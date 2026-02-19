@@ -1,0 +1,17 @@
+[package]
+name = "stellarstream-contracts"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+lto = true
+codegen-units = 1
+strip = true
