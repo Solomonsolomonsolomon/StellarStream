@@ -17,4 +17,5 @@ pub struct Stream {
 pub enum DataKey {
     Stream(u64),
     Admin,
+    ReentrancyLock,
 }
