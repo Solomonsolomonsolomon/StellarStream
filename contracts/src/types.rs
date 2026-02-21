@@ -29,5 +29,7 @@ pub enum DataKey {
     Stream(u64),
     StreamId,
     Admin,
+    FeeBps,
+    Treasury,
     IsPaused,
 }

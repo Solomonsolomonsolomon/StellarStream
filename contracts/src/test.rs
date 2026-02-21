@@ -128,6 +128,28 @@ fn test_cancellation_split() {
 }
 
 #[test]
+fn test_protocol_fee() {
+    let ctx = setup_test();
+    let admin = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+    let sender = Address::generate(&ctx.env);
+    let receiver = Address::generate(&ctx.env);
+
+    ctx.client.initialize_fee(&admin, &100, &treasury);
+
+    ctx.token.mint(&sender, &1000);
+    let stream_id =
+        ctx.client
+            .create_stream(&sender, &receiver, &ctx.token_id, &1000, &0, &100, &1000);
+
+    assert_eq!(stream_id, 1);
+
+    let token_client = token::Client::new(&ctx.env, &ctx.token_id);
+    assert_eq!(token_client.balance(&treasury), 10);
+    assert_eq!(token_client.balance(&ctx.contract_id), 990);
+}
+
+#[test]
 fn test_transfer_receiver() {
     let ctx = setup_test();
     let sender = Address::generate(&ctx.env);
@@ -291,6 +313,26 @@ fn test_pause_blocks_withdraw() {
     });
 
     ctx.client.withdraw(&stream_id, &receiver);
+}
+
+#[test]
+#[should_panic(expected = "Fee cannot exceed 10%")]
+fn test_fee_cap() {
+    let ctx = setup_test();
+    let admin = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+
+    ctx.client.initialize_fee(&admin, &1001, &treasury);
+}
+
+#[test]
+fn test_update_fee() {
+    let ctx = setup_test();
+    let admin = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+
+    ctx.client.initialize_fee(&admin, &100, &treasury);
+    ctx.client.update_fee(&admin, &200);
 }
 
 #[test]

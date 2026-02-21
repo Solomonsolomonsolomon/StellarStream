@@ -15,6 +15,32 @@ pub struct StellarStream;
 
 #[contractimpl]
 impl StellarStream {
+    pub fn initialize_fee(env: Env, admin: Address, fee_bps: u32, treasury: Address) {
+        admin.require_auth();
+        if fee_bps > 1000 {
+            panic!("Fee cannot exceed 10%");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+    }
+
+    pub fn update_fee(env: Env, admin: Address, fee_bps: u32) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        if admin != stored_admin {
+            panic!("Unauthorized: Only admin can update fee");
+        }
+        if fee_bps > 1000 {
+            panic!("Fee cannot exceed 10%");
+        }
+        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+    }
+
     pub fn initialize(env: Env, admin: Address) {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -70,7 +96,20 @@ impl StellarStream {
         }
 
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&sender, &env.current_contract_address(), &amount);
+        let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
+        let fee_amount = (amount * fee_bps as i128) / 10000;
+        let principal = amount - fee_amount;
+
+        token_client.transfer(&sender, &env.current_contract_address(), &principal);
+
+        if fee_amount > 0 {
+            let treasury: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Treasury)
+                .expect("Treasury not set");
+            token_client.transfer(&sender, &treasury, &fee_amount);
+        }
 
         let mut stream_id: u64 = env
             .storage()
@@ -85,7 +124,7 @@ impl StellarStream {
             sender: sender.clone(),
             receiver,
             token,
-            amount,
+            amount: principal,
             start_time,
             cliff_time,
             end_time,
