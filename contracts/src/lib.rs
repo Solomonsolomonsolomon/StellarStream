@@ -1,720 +1,540 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
-pub mod interest;
-pub mod math;
-mod test;
+mod errors;
+mod storage;
 mod types;
 
-#[cfg(test)]
-mod interest_test;
-
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
-pub use types::{DataKey, InterestDistribution, LegacyStream, Stream, StreamRequest};
-
-const THRESHOLD: u32 = 518400; // ~30 days
-const LIMIT: u32 = 1036800; // ~60 days
+use errors::Error;
+use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
+use storage::{PROPOSAL_COUNT, STREAM_COUNT};
+use types::{Stream, StreamProposal};
 
 #[contract]
-pub struct StellarStream;
+pub struct StellarStreamContract;
 
-#[allow(clippy::too_many_arguments)]
 #[contractimpl]
-impl StellarStream {
-    // ========== Migration Functions ==========
+impl StellarStreamContract {
+    pub fn create_proposal(
+        env: Env,
+        sender: Address,
+        receiver: Address,
+        token: Address,
+        total_amount: i128,
+        start_time: u64,
+        end_time: u64,
+        required_approvals: u32,
+        deadline: u64,
+    ) -> Result<u64, Error> {
+        sender.require_auth();
 
-    /// Get the current contract version
-    pub fn get_version(env: Env) -> u32 {
+        if start_time >= end_time {
+            return Err(Error::InvalidTimeRange);
+        }
+        if total_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if required_approvals == 0 {
+            return Err(Error::InvalidApprovalThreshold);
+        }
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::ProposalExpired);
+        }
+
+        let proposal_id: u64 = env.storage().instance().get(&PROPOSAL_COUNT).unwrap_or(0);
+        let next_id = proposal_id + 1;
+
+        let proposal = StreamProposal {
+            sender: sender.clone(),
+            receiver,
+            token,
+            total_amount,
+            start_time,
+            end_time,
+            approvers: Vec::new(&env),
+            required_approvals,
+            deadline,
+            executed: false,
+        };
+
         env.storage()
             .instance()
-            .get(&DataKey::ContractVersion)
-            .unwrap_or(1) // Default to version 1 if not set
+            .set(&(PROPOSAL_COUNT, proposal_id), &proposal);
+        env.storage().instance().set(&PROPOSAL_COUNT, &next_id);
+
+        Ok(proposal_id)
     }
 
-    /// Set the contract version (internal use only)
-    fn set_version(env: &Env, version: u32) {
-        env.storage()
-            .instance()
-            .set(&DataKey::ContractVersion, &version);
-    }
+    pub fn approve_proposal(env: Env, proposal_id: u64, approver: Address) -> Result<(), Error> {
+        approver.require_auth();
 
-    /// Check if a specific migration has been executed
-    fn is_migration_executed(env: &Env, migration_version: u32) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey::MigrationExecuted(migration_version))
-            .unwrap_or(false)
-    }
-
-    /// Mark a migration as executed (self-destructing mechanism)
-    fn mark_migration_executed(env: &Env, migration_version: u32) {
-        env.storage()
-            .instance()
-            .set(&DataKey::MigrationExecuted(migration_version), &true);
-    }
-
-    /// Main migration function - orchestrates all migrations
-    /// Can only be called by admin and only once per version
-    pub fn migrate(env: Env, admin: Address, target_version: u32) {
-        admin.require_auth();
-
-        // Verify admin authorization
-        let stored_admin: Address = env
+        let key = (PROPOSAL_COUNT, proposal_id);
+        let mut proposal: StreamProposal = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .expect("Admin not set");
-        if admin != stored_admin {
-            panic!("Unauthorized: Only admin can run migrations");
+            .get(&key)
+            .ok_or(Error::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(Error::ProposalAlreadyExecuted);
+        }
+        if env.ledger().timestamp() > proposal.deadline {
+            return Err(Error::ProposalExpired);
         }
 
-        // Check if this migration has already been executed
-        if Self::is_migration_executed(&env, target_version) {
-            panic!(
-                "Migration for version {} has already been executed",
-                target_version
-            );
-        }
-
-        let current_version = Self::get_version(env.clone());
-
-        // Ensure we're migrating forward
-        if target_version <= current_version {
-            panic!("Target version must be greater than current version");
-        }
-
-        // Execute migrations sequentially
-        for version in (current_version + 1)..=target_version {
-            match version {
-                2 => Self::migrate_v1_to_v2(&env),
-                _ => panic!("No migration defined for version {}", version),
+        for existing_approver in proposal.approvers.iter() {
+            if existing_approver == approver {
+                return Err(Error::AlreadyApproved);
             }
         }
 
-        // Mark migration as executed (self-destructing)
-        Self::mark_migration_executed(&env, target_version);
+        proposal.approvers.push_back(approver);
+        let approval_count = proposal.approvers.len();
 
-        // Update contract version
-        Self::set_version(&env, target_version);
-
-        // Emit migration event
-        env.events()
-            .publish((symbol_short!("migrate"), admin), target_version);
-    }
-
-    /// Migration from v1 to v2: Add cliff_time to existing streams
-    /// Legacy streams (v1) didn't have cliff_time, so we set it to start_time
-    fn migrate_v1_to_v2(env: &Env) {
-        let stream_count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::StreamId)
-            .unwrap_or(0);
-
-        // Iterate through all existing streams
-        for stream_id in 1..=stream_count {
-            let stream_key = DataKey::Stream(stream_id);
-
-            // Check if stream exists
-            if !env.storage().persistent().has(&stream_key) {
-                continue;
-            }
-
-            // Try to read as current Stream format first
-            // If it succeeds, the stream is already migrated
-            if env
-                .storage()
-                .persistent()
-                .get::<DataKey, Stream>(&stream_key)
-                .is_some()
-            {
-                continue; // Already in new format, skip
-            }
-
-            // If reading as Stream failed, try as LegacyStream
-            // Note: In practice, we'd need to handle this more carefully
-            // For now, we'll just skip streams that can't be read
-        }
-    }
-
-    /// Helper function to manually migrate a single stream (for testing/recovery)
-    pub fn migrate_single_stream(env: Env, admin: Address, stream_id: u64) {
-        admin.require_auth();
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Admin not set");
-        if admin != stored_admin {
-            panic!("Unauthorized: Only admin can migrate streams");
-        }
-
-        let stream_key = DataKey::Stream(stream_id);
-
-        // Try to read as LegacyStream
-        if let Some(legacy_stream) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, LegacyStream>(&stream_key)
-        {
-            let migrated_stream = Stream {
-                sender: legacy_stream.sender,
-                receiver: legacy_stream.receiver,
-                token: legacy_stream.token,
-                amount: legacy_stream.amount,
-                start_time: legacy_stream.start_time,
-                cliff_time: legacy_stream.start_time,
-                end_time: legacy_stream.end_time,
-                withdrawn_amount: legacy_stream.withdrawn_amount,
-                interest_strategy: 0, // No interest strategy for legacy streams
-                vault_address: None,  // No vault for legacy streams
-                deposited_principal: legacy_stream.amount, // Same as amount for legacy
-            };
-
-            env.storage()
-                .persistent()
-                .set(&stream_key, &migrated_stream);
-
-            env.events()
-                .publish((symbol_short!("mig_strm"), admin), stream_id);
+        if approval_count >= proposal.required_approvals {
+            proposal.executed = true;
+            env.storage().instance().set(&key, &proposal);
+            Self::execute_proposal(env, proposal)?;
         } else {
-            panic!(
-                "Stream {} is not in legacy format or does not exist",
-                stream_id
-            );
+            env.storage().instance().set(&key, &proposal);
         }
+
+        Ok(())
     }
 
-    // ========== Admin & Fee Management ==========
-    pub fn initialize_fee(env: Env, admin: Address, fee_bps: u32, treasury: Address) {
-        admin.require_auth();
-        if fee_bps > 1000 {
-            panic!("Fee cannot exceed 10%");
-        }
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-        env.storage().instance().set(&DataKey::Treasury, &treasury);
-    }
+    fn execute_proposal(env: Env, proposal: StreamProposal) -> Result<u64, Error> {
+        let token_client = token::Client::new(&env, &proposal.token);
+        token_client.transfer(
+            &proposal.sender,
+            &env.current_contract_address(),
+            &proposal.total_amount,
+        );
 
-    pub fn update_fee(env: Env, admin: Address, fee_bps: u32) {
-        admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
+        let stream_id: u64 = env.storage().instance().get(&STREAM_COUNT).unwrap_or(0);
+        let next_id = stream_id + 1;
+
+        let stream = Stream {
+            sender: proposal.sender,
+            receiver: proposal.receiver,
+            token: proposal.token,
+            total_amount: proposal.total_amount,
+            start_time: proposal.start_time,
+            end_time: proposal.end_time,
+            withdrawn: 0,
+            cancelled: false,
+        };
+
+        env.storage()
             .instance()
-            .get(&DataKey::Admin)
-            .expect("Admin not set");
-        if admin != stored_admin {
-            panic!("Unauthorized: Only admin can update fee");
-        }
-        if fee_bps > 1000 {
-            panic!("Fee cannot exceed 10%");
-        }
-        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+            .set(&(STREAM_COUNT, stream_id), &stream);
+        env.storage().instance().set(&STREAM_COUNT, &next_id);
+
+        Ok(stream_id)
     }
 
-    pub fn initialize(env: Env, admin: Address) {
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::IsPaused, &false);
-    }
-
-    pub fn set_pause(env: Env, admin: Address, paused: bool) {
-        admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Admin not set");
-        if admin != stored_admin {
-            panic!("Unauthorized: Only admin can pause");
-        }
-        env.storage().instance().set(&DataKey::IsPaused, &paused);
-    }
-
-    /// Check if contract is paused (inlined for performance)
-    #[inline(always)]
-    fn check_not_paused(env: &Env) {
-        let is_paused: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::IsPaused)
-            .unwrap_or(false);
-        if is_paused {
-            panic!("Contract is paused");
-        }
-    }
-
-    /// Optimized withdraw function - most frequently called
-    /// Minimizes storage reads and uses inlined math functions
-    /// Optimized create_stream with better fee calculation
-    #[allow(clippy::too_many_arguments)]
     pub fn create_stream(
         env: Env,
         sender: Address,
         receiver: Address,
         token: Address,
-        amount: i128,
+        total_amount: i128,
         start_time: u64,
-        cliff_time: u64,
         end_time: u64,
-        interest_strategy: u32,
-        vault_address: Option<Address>,
-    ) -> u64 {
-        Self::check_not_paused(&env);
-        Self::check_not_decommissioned(&env);
+    ) -> Result<u64, Error> {
         sender.require_auth();
 
-        // Early validation to fail fast
-        if end_time <= start_time {
-            panic!("End time must be after start time");
+        if start_time >= end_time {
+            return Err(Error::InvalidTimeRange);
         }
-        if cliff_time < start_time || cliff_time >= end_time {
-            panic!("Cliff time must be between start and end time");
-        }
-        if amount <= 0 {
-            panic!("Amount must be greater than zero");
-        }
-
-        // Validate interest strategy (must be between 0-7)
-        if interest_strategy > 7 {
-            panic!("Invalid interest strategy");
-        }
-
-        let token_client = token::Client::new(&env, &token);
-
-        // Get fee configuration once
-        let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
-
-        // Use optimized fee calculation
-        let fee_amount = math::calculate_fee(amount, fee_bps);
-        let principal = amount - fee_amount;
-
-        // Transfer principal to contract or vault
-        let deposit_target = if let Some(ref vault) = vault_address {
-            vault.clone()
-        } else {
-            env.current_contract_address()
-        };
-
-        token_client.transfer(&sender, &deposit_target, &principal);
-
-        // Transfer fee if applicable (avoid unnecessary storage read)
-        if fee_amount > 0 {
-            let treasury: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::Treasury)
-                .expect("Treasury not set");
-            token_client.transfer(&sender, &treasury, &fee_amount);
-        }
-
-        // Get and increment stream ID
-        let mut stream_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::StreamId)
-            .unwrap_or(0);
-        stream_id += 1;
-        env.storage().instance().set(&DataKey::StreamId, &stream_id);
-        env.storage().instance().extend_ttl(THRESHOLD, LIMIT);
-
-        // Create stream struct
-        let stream = Stream {
-            sender: sender.clone(),
-            receiver,
-            token,
-            amount: principal,
-            start_time,
-            cliff_time,
-            end_time,
-            withdrawn_amount: 0,
-            interest_strategy,
-            vault_address,
-            deposited_principal: principal,
-        };
-
-        // Store stream
-        let stream_key = DataKey::Stream(stream_id);
-        env.storage().persistent().set(&stream_key, &stream);
-        env.storage()
-            .persistent()
-            .extend_ttl(&stream_key, THRESHOLD, LIMIT);
-
-        // Emit event
-        env.events()
-            .publish((symbol_short!("create"), sender), stream_id);
-
-        stream_id
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_batch_streams(
-        env: Env,
-        sender: Address,
-        token: Address,
-        requests: Vec<StreamRequest>,
-    ) -> Vec<u64> {
-        Self::check_not_paused(&env);
-        Self::check_not_decommissioned(&env);
-        sender.require_auth();
-
-        let mut total_amount: i128 = 0;
-        for request in requests.iter() {
-            if request.end_time <= request.start_time {
-                panic!("End time must be after start time");
-            }
-            if request.amount <= 0 {
-                panic!("Amount must be greater than zero");
-            }
-            if request.interest_strategy > 7 {
-                panic!("Invalid interest strategy");
-            }
-            total_amount += request.amount;
+        if total_amount <= 0 {
+            return Err(Error::InvalidAmount);
         }
 
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&sender, &env.current_contract_address(), &total_amount);
 
-        let mut stream_ids = Vec::new(&env);
-        let mut stream_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::StreamId)
-            .unwrap_or(0);
+        let stream_id: u64 = env.storage().instance().get(&STREAM_COUNT).unwrap_or(0);
+        let next_id = stream_id + 1;
 
-        for request in requests.iter() {
-            stream_id += 1;
-
-            let stream = Stream {
-                sender: sender.clone(),
-                receiver: request.receiver.clone(),
-                token: token.clone(),
-                amount: request.amount,
-                start_time: request.start_time,
-                cliff_time: request.cliff_time,
-                end_time: request.end_time,
-                withdrawn_amount: 0,
-                interest_strategy: request.interest_strategy,
-                vault_address: request.vault_address.clone(),
-                deposited_principal: request.amount,
-            };
-
-            env.storage()
-                .persistent()
-                .set(&DataKey::Stream(stream_id), &stream);
-
-            env.events()
-                .publish((symbol_short!("create"), sender.clone()), stream_id);
-
-            stream_ids.push_back(stream_id);
-        }
-
-        env.storage().instance().set(&DataKey::StreamId, &stream_id);
-
-        stream_ids
-    }
-
-    pub fn withdraw(env: Env, stream_id: u64, receiver: Address) -> i128 {
-        Self::check_not_paused(&env);
-        receiver.require_auth();
-
-        // Re-entrancy guard
-        if Self::is_locked(&env) {
-            panic!("Re-entrancy detected");
-        }
-        Self::set_lock(&env, true);
-
-        let result = Self::withdraw_internal(&env, stream_id, &receiver);
-
-        Self::set_lock(&env, false);
-        result
-    }
-
-    fn withdraw_internal(env: &Env, stream_id: u64, receiver: &Address) -> i128 {
-        let stream_key = DataKey::Stream(stream_id);
-        let mut stream: Stream = env
-            .storage()
-            .persistent()
-            .get(&stream_key)
-            .expect("Stream does not exist");
-
-        if *receiver != stream.receiver {
-            panic!("Unauthorized: You are not the receiver of this stream");
-        }
-
-        let now = env.ledger().timestamp();
-
-        // Use precision-safe calculation that handles final withdrawal correctly
-        let withdrawable_principal = math::calculate_withdrawable(
-            stream.amount,
-            stream.withdrawn_amount,
-            stream.start_time,
-            stream.cliff_time,
-            stream.end_time,
-            now,
-        );
-
-        if withdrawable_principal <= 0 {
-            panic!("No funds available to withdraw at this time");
-        }
-
-        let token_client = token::Client::new(env, &stream.token);
-        let contract_address = env.current_contract_address();
-
-        // Calculate and distribute interest if vault is used
-        let mut total_withdrawn = withdrawable_principal;
-
-        if let Some(ref vault_addr) = stream.vault_address {
-            // Get current vault balance
-            let vault_balance = token_client.balance(vault_addr);
-
-            // Calculate interest earned
-            let total_interest =
-                interest::calculate_vault_interest(vault_balance, stream.deposited_principal);
-
-            if total_interest > 0 {
-                // Calculate proportional interest for this withdrawal
-                let proportional_interest = if stream.amount > 0 {
-                    (total_interest * withdrawable_principal) / stream.amount
-                } else {
-                    0
-                };
-
-                // Distribute interest according to strategy
-                let distribution = interest::calculate_interest_distribution(
-                    proportional_interest,
-                    stream.interest_strategy,
-                );
-
-                // Save receiver's interest share before moving distribution
-                let receiver_interest = distribution.to_receiver;
-
-                // Transfer interest to respective parties
-                if distribution.to_sender > 0 {
-                    token_client.transfer(vault_addr, &stream.sender, &distribution.to_sender);
-                }
-                if distribution.to_receiver > 0 {
-                    token_client.transfer(vault_addr, receiver, &distribution.to_receiver);
-                }
-                if distribution.to_protocol > 0 {
-                    let treasury: Address = env
-                        .storage()
-                        .instance()
-                        .get(&DataKey::Treasury)
-                        .expect("Treasury not set");
-                    token_client.transfer(vault_addr, &treasury, &distribution.to_protocol);
-                }
-
-                // Emit interest distribution event
-                env.events()
-                    .publish((symbol_short!("interest"), stream_id), distribution);
-
-                // Add receiver's interest share to total withdrawn
-                total_withdrawn += receiver_interest;
-            }
-
-            // Transfer principal from vault to receiver
-            token_client.transfer(vault_addr, receiver, &withdrawable_principal);
-        } else {
-            // No vault, simple transfer from contract
-            token_client.transfer(&contract_address, receiver, &withdrawable_principal);
-        }
-
-        stream.withdrawn_amount += withdrawable_principal;
-        env.storage().persistent().set(&stream_key, &stream);
-        env.storage()
-            .persistent()
-            .extend_ttl(&stream_key, THRESHOLD, LIMIT);
-
-        env.events().publish(
-            (symbol_short!("withdraw"), receiver.clone()),
-            (stream_id, total_withdrawn),
-        );
-
-        total_withdrawn
-    }
-
-    pub fn cancel_stream(env: Env, stream_id: u64) {
-        Self::check_not_paused(&env);
-
-        // Re-entrancy guard
-        if Self::is_locked(&env) {
-            panic!("Re-entrancy detected");
-        }
-        Self::set_lock(&env, true);
-
-        Self::cancel_stream_internal(&env, stream_id);
-
-        Self::set_lock(&env, false);
-    }
-
-    fn cancel_stream_internal(env: &Env, stream_id: u64) {
-        let stream_key = DataKey::Stream(stream_id);
-        let stream: Stream = env
-            .storage()
-            .persistent()
-            .get(&stream_key)
-            .expect("Stream does not exist");
-
-        stream.sender.require_auth();
-
-        // Get current time once
-        let now = env.ledger().timestamp();
-        let is_decommissioned: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::IsDecommissioned)
-            .unwrap_or(false);
-
-        // Early validation
-        if now >= stream.end_time {
-            panic!("Stream has already completed and cannot be cancelled");
-        }
-
-        // Use inlined math function
-        let total_unlocked = math::calculate_unlocked(
-            stream.amount,
-            stream.start_time,
-            stream.cliff_time,
-            stream.end_time,
-            now,
-        );
-
-        let withdrawable_to_receiver = total_unlocked - stream.withdrawn_amount;
-        let refund_to_sender = stream.amount - total_unlocked;
-
-        let token_client = token::Client::new(env, &stream.token);
-
-        // Determine source address (vault or contract)
-        let source_address = if let Some(ref vault_addr) = stream.vault_address {
-            // Handle interest distribution on cancellation
-            let vault_balance = token_client.balance(vault_addr);
-            let total_interest =
-                interest::calculate_vault_interest(vault_balance, stream.deposited_principal);
-
-            if total_interest > 0 {
-                let distribution = interest::calculate_interest_distribution(
-                    total_interest,
-                    stream.interest_strategy,
-                );
-
-                // Distribute all accumulated interest
-                if distribution.to_sender > 0 {
-                    token_client.transfer(vault_addr, &stream.sender, &distribution.to_sender);
-                }
-                if distribution.to_receiver > 0 {
-                    token_client.transfer(vault_addr, &stream.receiver, &distribution.to_receiver);
-                }
-                if distribution.to_protocol > 0 {
-                    let treasury: Address = env
-                        .storage()
-                        .instance()
-                        .get(&DataKey::Treasury)
-                        .expect("Treasury not set");
-                    token_client.transfer(vault_addr, &treasury, &distribution.to_protocol);
-                }
-
-                env.events()
-                    .publish((symbol_short!("interest"), stream_id), distribution);
-            }
-
-            vault_addr.clone()
-        } else {
-            env.current_contract_address()
+        let stream = Stream {
+            sender,
+            receiver,
+            token,
+            total_amount,
+            start_time,
+            end_time,
+            withdrawn: 0,
+            cancelled: false,
         };
 
-        if withdrawable_to_receiver > 0 {
-            token_client.transfer(&source_address, &stream.receiver, &withdrawable_to_receiver);
-        }
+        env.storage()
+            .instance()
+            .set(&(STREAM_COUNT, stream_id), &stream);
+        env.storage().instance().set(&STREAM_COUNT, &next_id);
 
-        if refund_to_sender > 0 {
-            token_client.transfer(&source_address, &stream.sender, &refund_to_sender);
-        }
-
-        // Remove stream from storage
-        env.storage().persistent().remove(&stream_key);
-
-        // Emit event
-        env.events()
-            .publish((symbol_short!("cancel"), stream_id), stream.sender);
+        Ok(stream_id)
     }
 
-    pub fn transfer_receiver(env: Env, stream_id: u64, new_receiver: Address) {
+    pub fn withdraw(env: Env, stream_id: u64, receiver: Address) -> Result<i128, Error> {
+        receiver.require_auth();
+
+        let key = (STREAM_COUNT, stream_id);
         let mut stream: Stream = env
             .storage()
-            .persistent()
-            .get(&DataKey::Stream(stream_id))
-            .expect("Stream does not exist");
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
 
-        stream.receiver.require_auth();
+        if stream.receiver != receiver {
+            return Err(Error::Unauthorized);
+        }
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
 
-        stream.receiver = new_receiver.clone();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Stream(stream_id), &stream);
+        let current_time = env.ledger().timestamp();
+        let unlocked = Self::calculate_unlocked(&stream, current_time);
+        let withdrawable = unlocked - stream.withdrawn;
 
-        env.events()
-            .publish((symbol_short!("transfer"), stream_id), new_receiver);
+        if withdrawable <= 0 {
+            return Err(Error::InsufficientBalance);
+        }
+
+        stream.withdrawn += withdrawable;
+        env.storage().instance().set(&key, &stream);
+
+        let token_client = token::Client::new(&env, &stream.token);
+        token_client.transfer(&env.current_contract_address(), &receiver, &withdrawable);
+
+        Ok(withdrawable)
     }
 
-    pub fn extend_stream_ttl(env: Env, stream_id: u64) {
-        let stream_key = DataKey::Stream(stream_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&stream_key, THRESHOLD, LIMIT);
-    }
+    pub fn cancel(env: Env, stream_id: u64, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
 
-    /// Get current interest information for a stream
-    pub fn get_interest_info(env: Env, stream_id: u64) -> InterestDistribution {
-        let stream: Stream = env
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
             .storage()
-            .persistent()
-            .get(&DataKey::Stream(stream_id))
-            .expect("Stream does not exist");
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
 
-        if let Some(ref vault_addr) = stream.vault_address {
-            let token_client = token::Client::new(&env, &stream.token);
-            let vault_balance = token_client.balance(vault_addr);
-
-            let total_interest =
-                interest::calculate_vault_interest(vault_balance, stream.deposited_principal);
-
-            interest::calculate_interest_distribution(total_interest, stream.interest_strategy)
-        } else {
-            InterestDistribution {
-                to_sender: 0,
-                to_receiver: 0,
-                to_protocol: 0,
-                total_interest: 0,
-            }
+        if stream.sender != caller && stream.receiver != caller {
+            return Err(Error::Unauthorized);
         }
-    }
-
-    /// Get stream details
-    pub fn get_stream(env: Env, stream_id: u64) -> Stream {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Stream(stream_id))
-            .expect("Stream does not exist")
-    }
-
-    // ========== Re-entrancy Guard Functions ==========
-
-    fn is_locked(env: &Env) -> bool {
-        env.storage()
-            .temporary()
-            .get(&DataKey::ReentrancyLock)
-            .unwrap_or(false)
-    }
-
-    fn set_lock(env: &Env, locked: bool) {
-        if locked {
-            env.storage()
-                .temporary()
-                .set(&DataKey::ReentrancyLock, &locked);
-        } else {
-            env.storage().temporary().remove(&DataKey::ReentrancyLock);
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
         }
+
+        let current_time = env.ledger().timestamp();
+        let unlocked = Self::calculate_unlocked(&stream, current_time);
+        let to_receiver = unlocked - stream.withdrawn;
+        let to_sender = stream.total_amount - unlocked;
+
+        stream.cancelled = true;
+        stream.withdrawn = unlocked;
+        env.storage().instance().set(&key, &stream);
+
+        let token_client = token::Client::new(&env, &stream.token);
+        if to_receiver > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &stream.receiver,
+                &to_receiver,
+            );
+        }
+        if to_sender > 0 {
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &to_sender);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, Error> {
+        env.storage()
+            .instance()
+            .get(&(STREAM_COUNT, stream_id))
+            .ok_or(Error::StreamNotFound)
+    }
+
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Result<StreamProposal, Error> {
+        env.storage()
+            .instance()
+            .get(&(PROPOSAL_COUNT, proposal_id))
+            .ok_or(Error::ProposalNotFound)
+    }
+
+    fn calculate_unlocked(stream: &Stream, current_time: u64) -> i128 {
+        if current_time <= stream.start_time {
+            return 0;
+        }
+        if current_time >= stream.end_time {
+            return stream.total_amount;
+        }
+
+        let elapsed = (current_time - stream.start_time) as i128;
+        let duration = (stream.end_time - stream.start_time) as i128;
+        (stream.total_amount * elapsed) / duration
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::{StellarAssetClient, TokenClient},
+        Address, Env,
+    };
+
+    fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, TokenClient<'a>) {
+        let contract_id = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        (contract_id.clone(), TokenClient::new(env, &contract_id))
+    }
+
+    #[test]
+    fn test_create_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &2, &1000);
+
+        assert_eq!(proposal_id, 0);
+    }
+
+    #[test]
+    fn test_approve_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let approver1 = Address::generate(&env);
+        let approver2 = Address::generate(&env);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &2, &1000);
+
+        client.approve_proposal(&proposal_id, &approver1);
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.approvers.len(), 1);
+        assert!(!proposal.executed);
+
+        client.approve_proposal(&proposal_id, &approver2);
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.approvers.len(), 2);
+        assert!(proposal.executed);
+    }
+
+    #[test]
+    fn test_duplicate_approval_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let approver = Address::generate(&env);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &2, &1000);
+
+        client.approve_proposal(&proposal_id, &approver);
+        let result = client.try_approve_proposal(&proposal_id, &approver);
+
+        assert_eq!(result, Err(Ok(Error::AlreadyApproved)));
+    }
+
+    #[test]
+    fn test_proposal_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let approver = Address::generate(&env);
+        let result = client.try_approve_proposal(&999, &approver);
+
+        assert_eq!(result, Err(Ok(Error::ProposalNotFound)));
+    }
+
+    #[test]
+    fn test_invalid_time_range() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let result =
+            client.try_create_proposal(&sender, &receiver, &token_id, &1000, &200, &100, &2, &1000);
+
+        assert_eq!(result, Err(Ok(Error::InvalidTimeRange)));
+    }
+
+    #[test]
+    fn test_invalid_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let result =
+            client.try_create_proposal(&sender, &receiver, &token_id, &0, &100, &200, &2, &1000);
+
+        assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_invalid_approval_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let result =
+            client.try_create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &0, &1000);
+
+        assert_eq!(result, Err(Ok(Error::InvalidApprovalThreshold)));
+    }
+
+    #[test]
+    fn test_create_direct_stream() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let stream_id = client.create_stream(&sender, &receiver, &token_id, &1000, &100, &200);
+
+        assert_eq!(stream_id, 0);
+
+        let stream = client.get_stream(&stream_id);
+        assert_eq!(stream.total_amount, 1000);
+        assert!(!stream.cancelled);
+    }
+
+    #[test]
+    fn test_three_of_five_multisig() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &100000);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &50000, &100, &200, &3, &1000);
+
+        let approver1 = Address::generate(&env);
+        let approver2 = Address::generate(&env);
+        let approver3 = Address::generate(&env);
+
+        client.approve_proposal(&proposal_id, &approver1);
+        let proposal = client.get_proposal(&proposal_id);
+        assert!(!proposal.executed);
+
+        client.approve_proposal(&proposal_id, &approver2);
+        let proposal = client.get_proposal(&proposal_id);
+        assert!(!proposal.executed);
+
+        client.approve_proposal(&proposal_id, &approver3);
+        let proposal = client.get_proposal(&proposal_id);
+        assert!(proposal.executed);
+        assert_eq!(proposal.approvers.len(), 3);
+    }
+
+    #[test]
+    fn test_approve_already_executed_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = 50);
+
+        let contract_id = env.register(StellarStreamContract, ());
+        let client = StellarStreamContractClient::new(&env, &contract_id);
+
+        let sender = Address::generate(&env);
+        let receiver = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let (token_id, _) = create_token_contract(&env, &admin);
+
+        let token_admin_client = StellarAssetClient::new(&env, &token_id);
+        token_admin_client.mint(&sender, &10000);
+
+        let proposal_id =
+            client.create_proposal(&sender, &receiver, &token_id, &1000, &100, &200, &1, &1000);
+
+        let approver1 = Address::generate(&env);
+        client.approve_proposal(&proposal_id, &approver1);
+
+        let approver2 = Address::generate(&env);
+        let result = client.try_approve_proposal(&proposal_id, &approver2);
+
+        assert_eq!(result, Err(Ok(Error::ProposalAlreadyExecuted)));
     }
 }
