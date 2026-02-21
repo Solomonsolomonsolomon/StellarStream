@@ -137,7 +137,7 @@ impl StellarStreamContract {
 
     fn execute_proposal(env: &Env, proposal: StreamProposal) -> Result<u64, Error> {
         // Transfer tokens from proposer to contract
-        let token_client = token::Client::new(&env, &proposal.token);
+        let token_client = token::Client::new(env, &proposal.token);
         token_client.transfer(
             &proposal.sender,
             &env.current_contract_address(),
@@ -166,7 +166,7 @@ impl StellarStreamContract {
             is_paused: false,
             paused_time: 0,
             total_paused_duration: 0,
-            milestones: Vec::new(&env),
+            milestones: Vec::new(env),
         };
 
         env.storage()
@@ -188,7 +188,7 @@ impl StellarStreamContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::mint_receipt(&env, stream_id, &proposal.receiver);
+        Self::mint_receipt(env, stream_id, &proposal.receiver);
 
         Ok(stream_id)
     }
