@@ -7,8 +7,11 @@ mod types;
 #[cfg(test)]
 mod upgrade_test;
 
+#[cfg(test)]
+mod rbac_test;
+
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
-pub use types::{DataKey, Stream, StreamRequest};
+pub use types::{DataKey, Role, Stream, StreamRequest};
 
 const THRESHOLD: u32 = 518400; // ~30 days
 const LIMIT: u32 = 1036800; // ~60 days
@@ -18,49 +21,135 @@ pub struct StellarStream;
 
 #[contractimpl]
 impl StellarStream {
-    pub fn initialize_fee(env: Env, admin: Address, fee_bps: u32, treasury: Address) {
-        admin.require_auth();
-        if fee_bps > 1000 {
-            panic!("Fee cannot exceed 10%");
-        }
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-        env.storage().instance().set(&DataKey::Treasury, &treasury);
-    }
+    // ========== RBAC Functions ==========
 
-    pub fn update_fee(env: Env, admin: Address, fee_bps: u32) {
-        admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Admin not set");
-        if admin != stored_admin {
-            panic!("Unauthorized: Only admin can update fee");
-        }
-        if fee_bps > 1000 {
-            panic!("Fee cannot exceed 10%");
-        }
-        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-    }
-
+    /// Initialize the contract with an admin who has all roles
     pub fn initialize(env: Env, admin: Address) {
         admin.require_auth();
+
+        // Grant all roles to the initial admin
+        Self::grant_role_internal(&env, &admin, Role::Admin);
+        Self::grant_role_internal(&env, &admin, Role::Pauser);
+        Self::grant_role_internal(&env, &admin, Role::TreasuryManager);
+
+        // Set legacy admin for backward compatibility
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::IsPaused, &false);
     }
 
-    pub fn set_pause(env: Env, admin: Address, paused: bool) {
+    /// Grant a role to an address (Admin only)
+    pub fn grant_role(env: Env, admin: Address, account: Address, role: Role) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Admin not set");
-        if admin != stored_admin {
-            panic!("Unauthorized: Only admin can pause");
+
+        // Only Admin role can grant roles
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            panic!("Unauthorized: Only Admin can grant roles");
         }
+
+        Self::grant_role_internal(&env, &account, role.clone());
+
+        env.events()
+            .publish((symbol_short!("grant"), admin), (account, role));
+    }
+
+    /// Revoke a role from an address (Admin only)
+    pub fn revoke_role(env: Env, admin: Address, account: Address, role: Role) {
+        admin.require_auth();
+
+        // Only Admin role can revoke roles
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            panic!("Unauthorized: Only Admin can revoke roles");
+        }
+
+        Self::revoke_role_internal(&env, &account, role.clone());
+
+        env.events()
+            .publish((symbol_short!("revoke"), admin), (account, role));
+    }
+
+    /// Check if an address has a specific role (internal helper)
+    fn has_role(env: &Env, account: &Address, role: Role) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Role(account.clone(), role))
+            .unwrap_or(false)
+    }
+
+    /// Check if an address has a specific role (public query function)
+    pub fn check_role(env: Env, account: Address, role: Role) -> bool {
+        Self::has_role(&env, &account, role)
+    }
+
+    // Internal helper to grant role
+    fn grant_role_internal(env: &Env, account: &Address, role: Role) {
+        env.storage()
+            .instance()
+            .set(&DataKey::Role(account.clone(), role), &true);
+    }
+
+    // Internal helper to revoke role
+    fn revoke_role_internal(env: &Env, account: &Address, role: Role) {
+        env.storage()
+            .instance()
+            .remove(&DataKey::Role(account.clone(), role));
+    }
+
+    // ========== Fee Management (TreasuryManager role) ==========
+
+    pub fn initialize_fee(env: Env, admin: Address, fee_bps: u32, treasury: Address) {
+        admin.require_auth();
+
+        // Check if caller has TreasuryManager role
+        if !Self::has_role(&env, &admin, Role::TreasuryManager) {
+            panic!("Unauthorized: Only TreasuryManager can set fees");
+        }
+
+        if fee_bps > 1000 {
+            panic!("Fee cannot exceed 10%");
+        }
+        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+    }
+
+    pub fn update_fee(env: Env, manager: Address, fee_bps: u32) {
+        manager.require_auth();
+
+        // Check if caller has TreasuryManager role
+        if !Self::has_role(&env, &manager, Role::TreasuryManager) {
+            panic!("Unauthorized: Only TreasuryManager can update fee");
+        }
+
+        if fee_bps > 1000 {
+            panic!("Fee cannot exceed 10%");
+        }
+        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+    }
+
+    pub fn update_treasury(env: Env, manager: Address, treasury: Address) {
+        manager.require_auth();
+
+        // Check if caller has TreasuryManager role
+        if !Self::has_role(&env, &manager, Role::TreasuryManager) {
+            panic!("Unauthorized: Only TreasuryManager can update treasury");
+        }
+
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+    }
+
+    // ========== Pause Management (Pauser role) ==========
+
+    pub fn set_pause(env: Env, pauser: Address, paused: bool) {
+        pauser.require_auth();
+
+        // Check if caller has Pauser role
+        if !Self::has_role(&env, &pauser, Role::Pauser) {
+            panic!("Unauthorized: Only Pauser can pause/unpause");
+        }
+
         env.storage().instance().set(&DataKey::IsPaused, &paused);
+
+        env.events()
+            .publish((symbol_short!("pause"), pauser), paused);
     }
 
     fn check_not_paused(env: &Env) {
@@ -331,17 +420,15 @@ impl StellarStream {
     }
 
     /// Upgrade the contract to a new WASM hash
-    /// Only the admin can perform this operation
-    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
-        // Get the admin address
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Admin not set");
-
-        // Require admin authorization
+    /// Upgrade the contract to a new WASM hash
+    /// Only addresses with Admin role can perform this operation
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         admin.require_auth();
+
+        // Check if caller has Admin role
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            panic!("Unauthorized: Only Admin can upgrade contract");
+        }
 
         // Update the contract WASM
         env.deployer()
@@ -352,7 +439,7 @@ impl StellarStream {
             .publish((symbol_short!("upgrade"), admin), new_wasm_hash);
     }
 
-    /// Get the current admin address
+    /// Get the current admin address (for backward compatibility)
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()

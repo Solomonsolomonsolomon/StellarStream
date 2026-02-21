@@ -46,7 +46,7 @@ fn test_get_admin_not_initialized() {
 }
 
 #[test]
-#[should_panic(expected = "Admin not set")]
+#[should_panic(expected = "Unauthorized: Only Admin can upgrade contract")]
 fn test_upgrade_without_initialization() {
     let env = Env::default();
     env.mock_all_auths();
@@ -55,10 +55,11 @@ fn test_upgrade_without_initialization() {
     let contract_id = env.register(StellarStream, ());
     let client = StellarStreamClient::new(&env, &contract_id);
 
+    let non_admin = Address::generate(&env);
     let new_wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
 
-    // Should panic because admin is not set
-    client.upgrade(&new_wasm_hash);
+    // Should panic because non-admin doesn't have Admin role
+    client.upgrade(&non_admin, &new_wasm_hash);
 }
 
 #[test]
@@ -100,9 +101,9 @@ fn test_admin_persists_through_pause() {
 #[test]
 #[ignore] // Requires actual WASM upload - run as integration test
 fn test_upgrade_by_admin() {
-    let (_env, _admin, client) = setup_test();
+    let (_env, admin, client) = setup_test();
     let new_wasm_hash = BytesN::from_array(&_env, &[1u8; 32]);
-    client.upgrade(&new_wasm_hash);
+    client.upgrade(&admin, &new_wasm_hash);
 }
 
 #[test]
@@ -114,7 +115,7 @@ fn test_upgrade_maintains_state() {
 
     let admin_before = client.get_admin();
     let new_wasm_hash = BytesN::from_array(&_env, &[2u8; 32]);
-    client.upgrade(&new_wasm_hash);
+    client.upgrade(&admin, &new_wasm_hash);
 
     let admin_after = client.get_admin();
     assert_eq!(admin_after, admin_before);

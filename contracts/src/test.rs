@@ -135,6 +135,8 @@ fn test_protocol_fee() {
     let sender = Address::generate(&ctx.env);
     let receiver = Address::generate(&ctx.env);
 
+    // Initialize contract with admin (grants all roles)
+    ctx.client.initialize(&admin);
     ctx.client.initialize_fee(&admin, &100, &treasury);
 
     ctx.token.mint(&sender, &1000);
@@ -322,6 +324,8 @@ fn test_fee_cap() {
     let admin = Address::generate(&ctx.env);
     let treasury = Address::generate(&ctx.env);
 
+    // Initialize contract with admin (grants all roles)
+    ctx.client.initialize(&admin);
     ctx.client.initialize_fee(&admin, &1001, &treasury);
 }
 
@@ -331,6 +335,8 @@ fn test_update_fee() {
     let admin = Address::generate(&ctx.env);
     let treasury = Address::generate(&ctx.env);
 
+    // Initialize contract with admin (grants all roles)
+    ctx.client.initialize(&admin);
     ctx.client.initialize_fee(&admin, &100, &treasury);
     ctx.client.update_fee(&admin, &200);
 }

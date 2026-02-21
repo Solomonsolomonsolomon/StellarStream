@@ -1,5 +1,14 @@
 use soroban_sdk::{contracttype, Address};
 
+// Role definitions for RBAC
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Role {
+    Admin,           // Can grant/revoke roles, upgrade contract
+    Pauser,          // Can pause/unpause contract
+    TreasuryManager, // Can update fees and treasury address
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Stream {
@@ -28,8 +37,9 @@ pub struct StreamRequest {
 pub enum DataKey {
     Stream(u64),
     StreamId,
-    Admin,
+    Admin, // Kept for backward compatibility
     FeeBps,
     Treasury,
     IsPaused,
+    Role(Address, Role), // New: Store roles per address
 }
