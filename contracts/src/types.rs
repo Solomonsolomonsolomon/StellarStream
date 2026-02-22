@@ -33,13 +33,6 @@ pub enum Role {
 }
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
-pub enum CurveType {
-    Linear = 0,
-    Exponential = 1,
-}
-
-#[contracttype]
 #[derive(Clone)]
 pub struct PriceOracle {
     pub oracle_address: Address,

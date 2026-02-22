@@ -9,8 +9,8 @@ mod storage;
 mod types;
 
 use errors::Error;
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Bytes, Env, IntoVal, Vec};
-use storage::{FLASH_LOAN_FEE, FLASH_LOAN_LOCK, PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
+use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
 use types::{
     CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent, ReceiptMetadata,
     ReceiptTransferredEvent, Role, Stream, StreamCancelledEvent, StreamClaimEvent,
@@ -784,6 +784,33 @@ impl StellarStreamContract {
         } else {
             milestone_cap
         }
+    }
+
+    fn calculate_unlocked_usd(stream: &Stream, current_time: u64, total_usd: i128) -> i128 {
+        if current_time <= stream.start_time {
+            return 0;
+        }
+
+        let mut effective_time = current_time;
+        if stream.is_paused {
+            effective_time = stream.paused_time;
+        }
+
+        let adjusted_end = stream.end_time + stream.total_paused_duration;
+        if effective_time >= adjusted_end {
+            return total_usd;
+        }
+
+        let elapsed = (effective_time - stream.start_time) as i128;
+        let paused = stream.total_paused_duration as i128;
+        let effective_elapsed = elapsed - paused;
+
+        if effective_elapsed <= 0 {
+            return 0;
+        }
+
+        let duration = (stream.end_time - stream.start_time) as i128;
+        (total_usd * effective_elapsed) / duration
     }
 
     // ========== RBAC Functions ==========
