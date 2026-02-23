@@ -145,6 +145,8 @@ pub enum DataKey {
     MigrationExecuted(u32), // Tracks which migrations have been executed
     Role(Address, Role),    // RBAC: stores role assignments
     SoulboundStreams,       // Vec<u64> of all soulbound stream IDs
+    ApprovedVaults,         // Vec<Address> of approved lending vaults
+    VaultShares(u64),       // Vault shares for stream_id
 }
 
 #[contracttype]

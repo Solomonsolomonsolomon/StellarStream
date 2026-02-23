@@ -7,17 +7,20 @@ mod math;
 mod oracle;
 mod storage;
 mod types;
+mod vault;
 
 #[cfg(test)]
 mod soulbound_test;
+#[cfg(test)]
+mod vault_test;
 
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
-use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT, RESTRICTED_ADDRESSES};
+use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
 use types::{
-    ContributorRequest, RequestCreatedEvent, RequestExecutedEvent, RequestKey, RequestStatus,
-    CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent, ReceiptMetadata,
-    ReceiptTransferredEvent, Role, Stream, StreamCancelledEvent, StreamClaimEvent,
+    ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent,
+    ReceiptMetadata, ReceiptTransferredEvent, RequestCreatedEvent, RequestExecutedEvent,
+    RequestKey, RequestStatus, Role, Stream, StreamCancelledEvent, StreamClaimEvent,
     StreamCreatedEvent, StreamPausedEvent, StreamProposal, StreamReceipt, StreamUnpausedEvent,
 };
 
@@ -212,7 +215,7 @@ impl StellarStreamContract {
     }
 
     /// Create a new stream with optional soulbound locking
-    /// 
+    ///
     /// # Parameters
     /// - `is_soulbound`: Set to true to permanently bind this stream to the receiver's address.
     ///   Cannot be changed after stream creation. Irreversible.
@@ -239,11 +242,12 @@ impl StellarStreamContract {
             milestones,
             curve_type,
             is_soulbound,
+            None, // No vault
         )
     }
 
     /// Create a new stream with milestones and optional soulbound locking
-    /// 
+    ///
     /// # Parameters
     /// - `is_soulbound`: Set to true to permanently bind this stream to the receiver's address.
     ///   Cannot be changed after stream creation. Irreversible.
@@ -258,6 +262,7 @@ impl StellarStreamContract {
         milestones: Vec<Milestone>,
         curve_type: CurveType,
         is_soulbound: bool,
+        vault_address: Option<Address>,
     ) -> Result<u64, Error> {
         sender.require_auth();
 
@@ -271,8 +276,26 @@ impl StellarStreamContract {
             return Err(Error::InvalidAmount);
         }
 
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&sender, &env.current_contract_address(), &total_amount);
+        // Validate vault if provided
+        let vault_shares = if let Some(ref vault) = vault_address {
+            // Check if vault is approved
+            if !Self::is_vault_approved(env.clone(), vault.clone()) {
+                return Err(Error::Unauthorized);
+            }
+
+            // Transfer tokens to contract first
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&sender, &env.current_contract_address(), &total_amount);
+
+            // Deposit to vault and get shares
+            vault::deposit_to_vault(&env, vault, &token, total_amount)
+                .map_err(|_| Error::InvalidAmount)?
+        } else {
+            // Standard stream without vault
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&sender, &env.current_contract_address(), &total_amount);
+            0
+        };
 
         let stream_id: u64 = env.storage().instance().get(&STREAM_COUNT).unwrap_or(0);
         let next_id = stream_id + 1;
@@ -286,7 +309,7 @@ impl StellarStreamContract {
             end_time,
             withdrawn_amount: 0,
             interest_strategy: 0,
-            vault_address: None,
+            vault_address: vault_address.clone(),
             deposited_principal: total_amount,
             metadata: None,
             withdrawn: 0,
@@ -310,6 +333,13 @@ impl StellarStreamContract {
             .instance()
             .set(&(STREAM_COUNT, stream_id), &stream);
         env.storage().instance().set(&STREAM_COUNT, &next_id);
+
+        // Store vault shares if vault is used
+        if vault_shares > 0 {
+            env.storage()
+                .instance()
+                .set(&DataKey::VaultShares(stream_id), &vault_shares);
+        }
 
         // If soulbound, emit event and add to index
         if is_soulbound {
@@ -738,6 +768,26 @@ impl StellarStreamContract {
         stream.withdrawn_amount += to_withdraw;
         env.storage().instance().set(&key, &stream);
 
+        // Handle vault withdrawal if stream uses vault
+        if let Some(ref vault) = stream.vault_address {
+            let shares = Self::get_vault_shares(env.clone(), stream_id);
+            if shares > 0 {
+                // Calculate proportional shares to withdraw
+                let total_shares = shares;
+                let shares_to_withdraw = (total_shares * to_withdraw) / stream.total_amount;
+
+                // Withdraw from vault
+                vault::withdraw_from_vault(&env, vault, shares_to_withdraw)
+                    .map_err(|_| Error::InsufficientBalance)?;
+
+                // Update remaining shares
+                let remaining_shares = total_shares - shares_to_withdraw;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::VaultShares(stream_id), &remaining_shares);
+            }
+        }
+
         let token_client = token::Client::new(&env, &stream.token);
         token_client.transfer(
             &env.current_contract_address(),
@@ -791,6 +841,21 @@ impl StellarStreamContract {
         stream.cancelled = true;
         stream.withdrawn = unlocked;
         env.storage().instance().set(&key, &stream);
+
+        // Handle vault withdrawal if stream uses vault
+        if let Some(ref vault) = stream.vault_address {
+            let shares = Self::get_vault_shares(env.clone(), stream_id);
+            if shares > 0 {
+                // Withdraw all remaining shares from vault
+                vault::withdraw_from_vault(&env, vault, shares)
+                    .map_err(|_| Error::InsufficientBalance)?;
+
+                // Clear shares
+                env.storage()
+                    .instance()
+                    .set(&DataKey::VaultShares(stream_id), &0_i128);
+            }
+        }
 
         let token_client = token::Client::new(&env, &stream.token);
         if to_receiver > 0 {
@@ -976,6 +1041,13 @@ impl StellarStreamContract {
             .unwrap_or(false)
     }
 
+    /// Internal helper to validate receiver (OFAC compliance stub)
+    fn validate_receiver(_env: &Env, _receiver: &Address) -> Result<(), Error> {
+        // Stub implementation - always allows
+        // In production, check against RESTRICTED_ADDRESSES list
+        Ok(())
+    }
+
     // ========== Contract Upgrade Functions ==========
 
     /// Upgrade the contract to a new WASM hash
@@ -997,6 +1069,86 @@ impl StellarStreamContract {
             .publish((symbol_short!("upgrade"), admin), new_wasm_hash);
     }
 
+    // ========== Vault Management Functions ==========
+
+    /// Add vault to approved list (Admin only)
+    pub fn approve_vault(env: Env, admin: Address, vault: Address) {
+        admin.require_auth();
+
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            return;
+        }
+
+        let vaults: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ApprovedVaults)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut new_vaults = vaults;
+        new_vaults.push_back(vault.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::ApprovedVaults, &new_vaults);
+
+        env.events()
+            .publish((symbol_short!("vault"), symbol_short!("approve")), vault);
+    }
+
+    /// Remove vault from approved list (Admin only)
+    pub fn revoke_vault(env: Env, admin: Address, vault: Address) {
+        admin.require_auth();
+
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            return;
+        }
+
+        let vaults: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ApprovedVaults)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Remove vault from list
+        let mut new_vaults = Vec::new(&env);
+        for v in vaults.iter() {
+            if v != vault {
+                new_vaults.push_back(v);
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ApprovedVaults, &new_vaults);
+
+        env.events()
+            .publish((symbol_short!("vault"), symbol_short!("revoke")), vault);
+    }
+
+    /// Check if vault is approved
+    pub fn is_vault_approved(env: Env, vault: Address) -> bool {
+        let vaults: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ApprovedVaults)
+            .unwrap_or(Vec::new(&env));
+
+        for v in vaults.iter() {
+            if v == vault {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get vault shares for a stream
+    pub fn get_vault_shares(env: Env, stream_id: u64) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::VaultShares(stream_id))
+            .unwrap_or(0)
+    }
+
     /// Get the current admin address (for backward compatibility)
     pub fn get_admin(env: Env) -> Address {
         env.storage()
@@ -1016,7 +1168,11 @@ impl StellarStreamContract {
         metadata: Option<soroban_sdk::BytesN<32>>,
     ) -> u64 {
         receiver.require_auth();
-        let count: u64 = env.storage().instance().get(&RequestKey::RequestCount).unwrap_or(0);
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&RequestKey::RequestCount)
+            .unwrap_or(0);
         let request_id = count + 1;
         let now = env.ledger().timestamp();
         let request = ContributorRequest {
@@ -1029,8 +1185,12 @@ impl StellarStreamContract {
             status: RequestStatus::Pending,
             metadata,
         };
-        env.storage().instance().set(&RequestKey::Request(request_id), &request);
-        env.storage().instance().set(&RequestKey::RequestCount, &request_id);
+        env.storage()
+            .instance()
+            .set(&RequestKey::Request(request_id), &request);
+        env.storage()
+            .instance()
+            .set(&RequestKey::RequestCount, &request_id);
         env.events().publish(
             (soroban_sdk::Symbol::new(&env, "RequestCreated"), request_id),
             RequestCreatedEvent {
@@ -1059,7 +1219,9 @@ impl StellarStreamContract {
             return Err(Error::AlreadyExecuted);
         }
         request.status = RequestStatus::Approved;
-        env.storage().instance().set(&RequestKey::Request(request_id), &request);
+        env.storage()
+            .instance()
+            .set(&RequestKey::Request(request_id), &request);
         let stream_id = Self::create_stream(
             env.clone(),
             admin.clone(),
@@ -1072,7 +1234,10 @@ impl StellarStreamContract {
             false, // Contributor requests default to non-soulbound
         )?;
         env.events().publish(
-            (soroban_sdk::Symbol::new(&env, "RequestExecuted"), request_id),
+            (
+                soroban_sdk::Symbol::new(&env, "RequestExecuted"),
+                request_id,
+            ),
             RequestExecutedEvent {
                 request_id,
                 stream_id,
@@ -1084,7 +1249,9 @@ impl StellarStreamContract {
     }
 
     pub fn get_request(env: Env, request_id: u64) -> Option<ContributorRequest> {
-        env.storage().instance().get(&RequestKey::Request(request_id))
+        env.storage()
+            .instance()
+            .get(&RequestKey::Request(request_id))
     }
 }
 
@@ -2286,7 +2453,7 @@ mod test {
             &200,
             &CurveType::Linear,
         );
-        
+
         // Verify stream was created (stream_id >= 0)
         assert!(stream_id >= 0);
     }
