@@ -17,6 +17,8 @@ mod dispute_test;
 #[cfg(test)]
 mod soulbound_test;
 #[cfg(test)]
+mod topup_test;
+#[cfg(test)]
 mod vault_test;
 #[cfg(test)]
 mod voting_test;
@@ -490,6 +492,70 @@ impl StellarStreamContract {
         Self::mint_receipt(&env, stream_id, &receiver);
 
         Ok(stream_id)
+    }
+
+    /// Top up an active stream with additional funds
+    pub fn top_up_stream(
+        env: Env,
+        stream_id: u64,
+        sender: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        sender.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let key = (STREAM_COUNT, stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        if stream.sender != sender {
+            return Err(Error::Unauthorized);
+        }
+
+        if stream.cancelled {
+            return Err(Error::AlreadyCancelled);
+        }
+
+        let current_time = env.ledger().timestamp();
+        if current_time >= stream.end_time {
+            return Err(Error::StreamEnded);
+        }
+
+        // Transfer tokens from sender
+        let token_client = token::Client::new(&env, &stream.token);
+        token_client.transfer(&sender, &env.current_contract_address(), &amount);
+
+        // Calculate new end time based on flow rate
+        let total_duration = stream.end_time.saturating_sub(stream.start_time);
+        let flow_rate = stream.total_amount / total_duration as i128;
+
+        let new_total = stream.total_amount + amount;
+        let additional_duration = amount / flow_rate;
+        let new_end_time = stream.end_time + additional_duration as u64;
+
+        stream.total_amount = new_total;
+        stream.end_time = new_end_time;
+        env.storage().instance().set(&key, &stream);
+
+        env.events().publish(
+            (symbol_short!("topup"), stream_id),
+            types::StreamToppedUpEvent {
+                stream_id,
+                sender,
+                amount,
+                new_total,
+                new_end_time,
+                timestamp: current_time,
+            },
+        );
+
+        Ok(())
     }
 
     pub fn pause_stream(env: Env, stream_id: u64, caller: Address) -> Result<(), Error> {
