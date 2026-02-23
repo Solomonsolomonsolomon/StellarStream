@@ -12,6 +12,8 @@ mod vault;
 mod voting;
 
 #[cfg(test)]
+mod allowlist_test;
+#[cfg(test)]
 mod clawback_test;
 #[cfg(test)]
 mod dispute_test;
@@ -35,7 +37,7 @@ mod vault_integration_test;
 
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
-use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
+use storage::{ALLOWLIST_ENABLED, ALLOWED_TOKENS, PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
 use types::{
     ClawbackEvent, ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent,
     ProposalCreatedEvent, ReceiptMetadata, ReceiptTransferredEvent, RequestCreatedEvent,
@@ -289,6 +291,9 @@ impl StellarStreamContract {
     ) -> Result<u64, Error> {
         sender.require_auth();
 
+        // Token allowlist validation
+        Self::validate_token(&env, &token)?;
+
         // OFAC Compliance: Check if receiver is restricted
         Self::validate_receiver(&env, &receiver)?;
 
@@ -418,6 +423,9 @@ impl StellarStreamContract {
         max_price: i128,
     ) -> Result<u64, Error> {
         sender.require_auth();
+
+        // Token allowlist validation
+        Self::validate_token(&env, &token)?;
 
         // OFAC Compliance: Check if receiver is restricted
         Self::validate_receiver(&env, &receiver)?;
@@ -1357,6 +1365,100 @@ impl StellarStreamContract {
     fn validate_receiver(_env: &Env, _receiver: &Address) -> Result<(), Error> {
         // Stub implementation - always allows
         // In production, check against RESTRICTED_ADDRESSES list
+        Ok(())
+    }
+
+    // ========== Token Allowlist Functions ==========
+
+    /// Enable or disable the token allowlist (Admin only)
+    pub fn set_allowlist_enabled(env: Env, admin: Address, enabled: bool) {
+        admin.require_auth();
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            panic!("{}", Error::Unauthorized as u32);
+        }
+        env.storage().instance().set(&ALLOWLIST_ENABLED, &enabled);
+        env.events().publish((symbol_short!("al_set"),), enabled);
+    }
+
+    /// Add a token to the allowlist (Admin only)
+    pub fn add_allowed_token(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            panic!("{}", Error::Unauthorized as u32);
+        }
+        let mut tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ALLOWED_TOKENS)
+            .unwrap_or(Vec::new(&env));
+        if !tokens.contains(&token) {
+            tokens.push_back(token.clone());
+            env.storage().instance().set(&ALLOWED_TOKENS, &tokens);
+        }
+        env.events().publish((symbol_short!("al_add"),), token);
+    }
+
+    /// Remove a token from the allowlist (Admin only)
+    pub fn remove_allowed_token(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        if !Self::has_role(&env, &admin, Role::Admin) {
+            panic!("{}", Error::Unauthorized as u32);
+        }
+        let mut tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ALLOWED_TOKENS)
+            .unwrap_or(Vec::new(&env));
+        if let Some(idx) = tokens.iter().position(|t| t == token) {
+            tokens.remove(idx as u32);
+            env.storage().instance().set(&ALLOWED_TOKENS, &tokens);
+        }
+        env.events().publish((symbol_short!("al_rem"),), token);
+    }
+
+    /// Check if allowlist is enabled
+    pub fn is_allowlist_enabled(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&ALLOWLIST_ENABLED)
+            .unwrap_or(false)
+    }
+
+    /// Check if a token is allowed
+    pub fn is_token_allowed(env: Env, token: Address) -> bool {
+        let enabled: bool = env
+            .storage()
+            .instance()
+            .get(&ALLOWLIST_ENABLED)
+            .unwrap_or(false);
+        if !enabled {
+            return true;
+        }
+        let tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ALLOWED_TOKENS)
+            .unwrap_or(Vec::new(&env));
+        tokens.contains(&token)
+    }
+
+    /// Internal helper to validate token allowlist
+    fn validate_token(env: &Env, token: &Address) -> Result<(), Error> {
+        let enabled: bool = env
+            .storage()
+            .instance()
+            .get(&ALLOWLIST_ENABLED)
+            .unwrap_or(false);
+        if enabled {
+            let tokens: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&ALLOWED_TOKENS)
+                .unwrap_or(Vec::new(env));
+            if !tokens.contains(token) {
+                return Err(Error::TokenNotAllowed);
+            }
+        }
         Ok(())
     }
 
