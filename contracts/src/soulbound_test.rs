@@ -456,7 +456,9 @@ fn test_get_soulbound_streams_index() {
         "First soulbound ID should match"
     );
     assert_eq!(
-        soulbound_streams.get(1).expect("Should have second element"),
+        soulbound_streams
+            .get(1)
+            .expect("Should have second element"),
         soulbound_id_2,
         "Second soulbound ID should match"
     );
