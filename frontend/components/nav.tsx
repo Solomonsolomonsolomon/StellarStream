@@ -1,19 +1,52 @@
 "use client";
 
+/**
+ * components/nav.tsx
+ * Modified for Issue #161 — Easter Egg: "The Stream Matrix"
+ * Added: 5-click logo trigger to activate StreamMatrix component
+ */
+
+import { useState, useCallback } from "react";
 import Link from "next/link";
 import { useWallet } from "@/lib/wallet-context";
 import { WalletConnectModal } from "./wallet-connect-modal";
+import { StreamMatrix } from "./stream-matrix";
 import { Wallet, ChevronDown } from "lucide-react";
 
 const navLinks = [
-  { href: "#about", label: "About" },
+  { href: "#about",        label: "About" },
   { href: "#how-it-works", label: "How it works" },
-  { href: "#assets", label: "Assets" },
-  { href: "#FAQ", label: "FAQ" },
+  { href: "#assets",       label: "Assets" },
+  { href: "#FAQ",          label: "FAQ" },
 ];
 
+// How many clicks to trigger the Easter egg
+const TRIGGER_CLICKS = 5;
+
 export function Nav() {
-  const { isConnected, address, walletType, openModal } = useWallet();
+  const { isConnected, address, openModal } = useWallet();
+
+  // ── Easter egg state ──
+  const [clickCount, setClickCount]     = useState(0);
+  const [matrixActive, setMatrixActive] = useState(false);
+
+  const handleLogoClick = useCallback(
+    (e: React.MouseEvent) => {
+      // Only intercept on non-href navigation (same page)
+      const next = clickCount + 1;
+      setClickCount(next);
+      if (next >= TRIGGER_CLICKS) {
+        e.preventDefault();
+        setClickCount(0);
+        setMatrixActive(true);
+      }
+    },
+    [clickCount]
+  );
+
+  const handleMatrixClose = useCallback(() => {
+    setMatrixActive(false);
+  }, []);
 
   const formatAddress = (addr: string | null) => {
     if (!addr) return "";
@@ -22,11 +55,30 @@ export function Nav() {
 
   return (
     <>
+      {/* ── Stream Matrix Easter Egg ── */}
+      <StreamMatrix active={matrixActive} onClose={handleMatrixClose} />
+
       <nav className="fixed top-4 left-1/2 -translate-x-1/2 w-[60%] max-w-7xl z-50">
         <div className="flex items-center justify-between px-8 py-3 rounded-full bg-black/20 backdrop-blur-xl border border-white/10 shadow-2xl">
-          {/* Logo */}
-          <Link href="/" className="flex items-center gap-2 group cursor-pointer">
-            <span className="text-white font-bold tracking-tighter text-lg">StellarStream</span>
+
+          {/* Logo — click 5× to trigger Easter egg */}
+          <Link
+            href="/"
+            onClick={handleLogoClick}
+            className="flex items-center gap-2 group cursor-pointer select-none"
+          >
+            <span
+              className="text-white font-bold tracking-tighter text-lg transition-all duration-150"
+              style={{
+                // Subtle glow hint as clicks accumulate
+                textShadow:
+                  clickCount > 0
+                    ? `0 0 ${clickCount * 4}px rgba(0,245,255,${clickCount * 0.15})`
+                    : "none",
+              }}
+            >
+              StellarStream
+            </span>
           </Link>
 
           {/* Navigation Links */}
