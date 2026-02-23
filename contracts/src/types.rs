@@ -229,6 +229,17 @@ pub struct DisputeResolvedEvent {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct StreamToppedUpEvent {
+    pub stream_id: u64,
+    pub sender: Address,
+    pub amount: i128,
+    pub new_total: i128,
+    pub new_end_time: u64,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct ReceiptTransferredEvent {
     pub stream_id: u64,
     pub from: Address,
