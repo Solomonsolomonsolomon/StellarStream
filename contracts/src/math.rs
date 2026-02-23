@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 /// Calculate unlocked amount with precision-safe rounding
 /// Always rounds DOWN to favor contract solvency
 #[allow(dead_code)]
@@ -203,8 +205,6 @@ mod test {
         assert!(result_overflow.is_err() || result_overflow.is_ok());
     }
 }
-
-#[cfg(kani)]
 
 #[cfg(kani)]
 mod proofs {

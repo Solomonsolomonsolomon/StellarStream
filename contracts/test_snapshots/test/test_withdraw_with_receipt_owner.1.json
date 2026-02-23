@@ -322,7 +322,21 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "arbiter"
+                              },
+                              "val": "void"
+                            },
+                            {
+                              "key": {
                                 "symbol": "cancelled"
+                              },
+                              "val": {
+                                "bool": false
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "clawback_enabled"
                               },
                               "val": {
                                 "bool": false
@@ -361,6 +375,14 @@
                               },
                               "val": {
                                 "u32": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "is_frozen"
+                              },
+                              "val": {
+                                "bool": false
                               }
                             },
                             {

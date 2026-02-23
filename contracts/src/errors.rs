@@ -25,4 +25,8 @@ pub enum Error {
     AlreadyExecuted = 20,
     /// Stream is soulbound: receiver cannot be transferred
     StreamIsSoulbound = 21,
+    /// Stream is frozen pending dispute resolution
+    StreamFrozen = 22,
+    /// Stream has already ended
+    StreamEnded = 23,
 }
