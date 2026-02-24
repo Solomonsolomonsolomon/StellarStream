@@ -6,6 +6,7 @@ mod flash_loan;
 mod interest;
 mod math;
 mod oracle;
+mod rbac;
 mod storage;
 mod types;
 mod vault;
