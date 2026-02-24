@@ -164,9 +164,11 @@ export function useMultipleLoadingStates<T extends string>(
   // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
-      Object.values(timeoutRefs.current).forEach(timeout => {
-        if (timeout) clearTimeout(timeout);
-      });
+      for (const timeout of Object.values(timeoutRefs.current) as Array<NodeJS.Timeout | null>) {
+        if (timeout !== null) {
+          clearTimeout(timeout);
+        }
+      }
     };
   }, []);
 

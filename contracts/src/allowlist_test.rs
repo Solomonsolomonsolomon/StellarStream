@@ -182,7 +182,10 @@ fn test_create_stream_with_disallowed_token() {
     );
 
     assert!(result.is_err());
-    assert_eq!(result.err(), Some(Ok(crate::errors::Error::TokenNotAllowed)));
+    assert_eq!(
+        result.err(),
+        Some(Ok(crate::errors::Error::TokenNotAllowed))
+    );
 }
 
 #[test]

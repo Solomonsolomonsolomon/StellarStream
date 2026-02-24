@@ -18,10 +18,10 @@ export function parseContractEvent(
       type: event.type,
       ledger: event.ledger,
       ledgerClosedAt: event.ledgerClosedAt,
-      contractId: event.contractId?.toString() || "unknown",
+      contractId: event.contractId?.toString() ?? "unknown",
       topics: event.topic.map((topic) => topic.toXDR("base64")),
       value: parseScVal(event.value),
-      txHash: event.txHash || "unknown",
+      txHash: event.txHash ?? "unknown",
       inSuccessfulContractCall: event.inSuccessfulContractCall,
     };
   } catch (error) {
@@ -98,7 +98,7 @@ function parseScVal(scVal: xdr.ScVal): unknown {
       }
 
       case "scvAddress":
-        return scVal.address().toString();
+        return (scVal.address() as unknown as { toString: () => string }).toString();
 
       case "scvContractInstance":
         return "ContractInstance";

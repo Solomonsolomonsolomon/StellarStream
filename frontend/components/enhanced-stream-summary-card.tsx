@@ -62,8 +62,9 @@ function Avatar({
     ["#feca57", "#ff9ff3"],
     ["#54a0ff", "#5f27cd"],
   ];
-  const colorIndex = parseInt(address.slice(-2), 16) % colors.length;
-  const [color1, color2] = colors[colorIndex];
+  const parsedTail = Number.parseInt(address.slice(-2), 16);
+  const colorIndex = Number.isNaN(parsedTail) ? 0 : parsedTail % colors.length;
+  const [color1, color2] = colors[colorIndex] ?? colors[0];
 
   return (
     <div

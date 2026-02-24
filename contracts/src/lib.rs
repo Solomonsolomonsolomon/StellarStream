@@ -43,12 +43,6 @@ use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
 use storage::{PROPOSAL_COUNT, RECEIPT, RESTRICTED_ADDRESSES, STREAM_COUNT};
 use types::{
-    ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent,
-    ReceiptMetadata, ReceiptTransferredEvent, RequestCreatedEvent, RequestExecutedEvent,
-    RequestKey, RequestStatus, Role, Stream, StreamCancelledEvent, StreamClaimEvent,
-    StreamCreatedEvent, StreamPausedEvent, StreamProposal, StreamReceipt, StreamUnpausedEvent,
-use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
-use types::{
     ClawbackEvent, ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent,
     ProposalCreatedEvent, ReceiptMetadata, ReceiptTransferredEvent, RequestCreatedEvent,
     RequestExecutedEvent, RequestKey, RequestStatus, Role, Stream, StreamCancelledEvent,
@@ -364,13 +358,11 @@ impl StellarStreamContract {
         };
 
         let stream_key = (STREAM_COUNT, stream_id);
-        
+
         // Extend contract instance TTL to ensure long-term accessibility
         Self::extend_contract_ttl(&env);
-        
-        env.storage()
-            .instance()
-            .set(&stream_key, &stream);
+
+        env.storage().instance().set(&stream_key, &stream);
         env.storage().instance().set(&STREAM_COUNT, &next_id);
 
         // Store vault shares if vault is used
@@ -419,48 +411,58 @@ impl StellarStreamContract {
 
     pub fn initialize(env: Env, admin: Address) {
         admin.require_auth();
-        
+
         // Set admin role
         env.storage().instance().set(&DataKey::Admin, &admin);
-        
+
         // Grant all roles to admin
-        env.storage().instance().set(&DataKey::Role(admin.clone(), Role::Admin), &true);
-        env.storage().instance().set(&DataKey::Role(admin.clone(), Role::Pauser), &true);
-        env.storage().instance().set(&DataKey::Role(admin.clone(), Role::TreasuryManager), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::Role(admin.clone(), Role::Admin), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::Role(admin.clone(), Role::Pauser), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::Role(admin.clone(), Role::TreasuryManager), &true);
     }
 
     pub fn grant_role(env: Env, admin: Address, target: Address, role: Role) {
         admin.require_auth();
-        
+
         // Check if admin has Admin role
         let has_admin_role: bool = env
             .storage()
             .instance()
             .get(&DataKey::Role(admin, Role::Admin))
             .unwrap_or(false);
-            
+
         if !has_admin_role {
             panic!("Unauthorized");
         }
-        
-        env.storage().instance().set(&DataKey::Role(target, role), &true);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Role(target, role), &true);
     }
 
     pub fn revoke_role(env: Env, admin: Address, target: Address, role: Role) {
         admin.require_auth();
-        
+
         // Check if admin has Admin role
         let has_admin_role: bool = env
             .storage()
             .instance()
             .get(&DataKey::Role(admin, Role::Admin))
             .unwrap_or(false);
-            
+
         if !has_admin_role {
             panic!("Unauthorized");
         }
-        
-        env.storage().instance().remove(&DataKey::Role(target, role));
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::Role(target, role));
     }
 
     pub fn check_role(env: Env, address: Address, role: Role) -> bool {

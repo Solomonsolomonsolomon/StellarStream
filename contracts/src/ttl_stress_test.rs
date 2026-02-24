@@ -24,9 +24,9 @@ fn setup_ttl_test() -> TtlTestContext {
         li.sequence_number = 100_000;
         // Set minimum TTL for persistent entries to 5 years
         li.min_persistent_entry_ttl = 60 * 60 * 24 * 365 * 5 / 5; // 1 year (ledgers are ~5 seconds)
-        // Set minimum TTL for temporary entries
+                                                                  // Set minimum TTL for temporary entries
         li.min_temp_entry_ttl = 60 * 60 * 24 * 30 / 5; // 30 days
-        // Set maximum TTL to 10 years
+                                                       // Set maximum TTL to 10 years
         li.max_entry_ttl = 60 * 60 * 24 * 365 * 10 / 5; // 10 years
     });
 
@@ -55,10 +55,10 @@ const SECONDS_PER_YEAR: u64 = SECONDS_PER_DAY * 365;
 /// Helper function to advance ledger time and extend TTL
 fn advance_time_and_extend_ttl(env: &Env, seconds: u64, current_timestamp: u64) {
     let new_timestamp = current_timestamp + seconds;
-    
+
     // Calculate ledger sequence increment (assuming ~5 seconds per ledger)
     let ledger_increment = seconds / 5;
-    
+
     // Set new ledger info with extended TTL
     env.ledger().with_mut(|li| {
         li.timestamp = new_timestamp;
@@ -106,15 +106,24 @@ fn test_four_year_stream_ttl_survival() {
 
     // Test 1: Jump forward 1 year and verify stream is still live
     advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR, start_time);
-    
+
     let stream_after_1_year = ctx.client.get_stream(&stream_id);
-    assert!(!stream_after_1_year.cancelled, "Stream should still be live after 1 year");
-    assert_eq!(stream_after_1_year.total_amount, amount, "Total amount should be preserved");
-    
+    assert!(
+        !stream_after_1_year.cancelled,
+        "Stream should still be live after 1 year"
+    );
+    assert_eq!(
+        stream_after_1_year.total_amount, amount,
+        "Total amount should be preserved"
+    );
+
     // Verify we can still withdraw (25% should be unlocked after 1 year)
     let withdrawn_1_year = ctx.client.withdraw(&stream_id, &receiver);
-    assert!(withdrawn_1_year > 0, "Should be able to withdraw after 1 year");
-    
+    assert!(
+        withdrawn_1_year > 0,
+        "Should be able to withdraw after 1 year"
+    );
+
     let expected_unlocked_1_year = amount / 4; // 25% after 1 year
     assert!(
         (withdrawn_1_year - expected_unlocked_1_year).abs() <= amount / 100, // 1% tolerance
@@ -123,15 +132,21 @@ fn test_four_year_stream_ttl_survival() {
 
     // Test 2: Jump forward to 2 years total and verify stream is still live
     advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR, start_time + SECONDS_PER_YEAR);
-    
+
     let stream_after_2_years = ctx.client.get_stream(&stream_id);
-    assert!(!stream_after_2_years.cancelled, "Stream should still be live after 2 years");
-    assert_eq!(stream_after_2_years.total_amount, amount, "Total amount should be preserved");
-    
+    assert!(
+        !stream_after_2_years.cancelled,
+        "Stream should still be live after 2 years"
+    );
+    assert_eq!(
+        stream_after_2_years.total_amount, amount,
+        "Total amount should be preserved"
+    );
+
     // Verify we can still withdraw additional amount (50% total should be unlocked)
     let withdrawn_2_years = ctx.client.withdraw(&stream_id, &receiver);
     let total_withdrawn_2_years = withdrawn_1_year + withdrawn_2_years;
-    
+
     let expected_unlocked_2_years = amount / 2; // 50% after 2 years
     assert!(
         (total_withdrawn_2_years - expected_unlocked_2_years).abs() <= amount / 50, // 2% tolerance
@@ -139,16 +154,26 @@ fn test_four_year_stream_ttl_survival() {
     );
 
     // Test 3: Jump forward to 4 years (end of stream) and verify final withdrawal
-    advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR * 2, start_time + SECONDS_PER_YEAR * 2);
-    
+    advance_time_and_extend_ttl(
+        &ctx.env,
+        SECONDS_PER_YEAR * 2,
+        start_time + SECONDS_PER_YEAR * 2,
+    );
+
     let stream_after_4_years = ctx.client.get_stream(&stream_id);
-    assert!(!stream_after_4_years.cancelled, "Stream should still be live after 4 years");
-    assert_eq!(stream_after_4_years.total_amount, amount, "Total amount should be preserved");
-    
+    assert!(
+        !stream_after_4_years.cancelled,
+        "Stream should still be live after 4 years"
+    );
+    assert_eq!(
+        stream_after_4_years.total_amount, amount,
+        "Total amount should be preserved"
+    );
+
     // Verify we can withdraw the remaining amount (100% should be unlocked)
     let withdrawn_4_years = ctx.client.withdraw(&stream_id, &receiver);
     let total_withdrawn_final = total_withdrawn_2_years + withdrawn_4_years;
-    
+
     assert!(
         (total_withdrawn_final - amount).abs() <= 1, // Allow for rounding errors
         "Should be able to withdraw full amount after 4 years"
@@ -156,12 +181,23 @@ fn test_four_year_stream_ttl_survival() {
 
     // Verify final state
     let final_stream = ctx.client.get_stream(&stream_id);
-    assert_eq!(final_stream.withdrawn_amount, amount, "All tokens should be withdrawn");
-    
+    assert_eq!(
+        final_stream.withdrawn_amount, amount,
+        "All tokens should be withdrawn"
+    );
+
     // Verify token balances
     let token_client = token::Client::new(&ctx.env, &ctx.token_id);
-    assert_eq!(token_client.balance(&receiver), amount, "Receiver should have all tokens");
-    assert_eq!(token_client.balance(&sender), 0, "Sender should have no tokens left");
+    assert_eq!(
+        token_client.balance(&receiver),
+        amount,
+        "Receiver should have all tokens"
+    );
+    assert_eq!(
+        token_client.balance(&sender),
+        0,
+        "Sender should have no tokens left"
+    );
 }
 
 /// Test TTL survival with multiple streams created at different times
@@ -182,26 +218,44 @@ fn test_multiple_streams_ttl_survival() {
 
     // Create three streams
     let stream_id_1 = ctx.client.create_stream(
-        &sender, &receiver1, &ctx.token_id, &amount_per_stream,
-        &start_time, &end_time, &CurveType::Linear, &false,
+        &sender,
+        &receiver1,
+        &ctx.token_id,
+        &amount_per_stream,
+        &start_time,
+        &end_time,
+        &CurveType::Linear,
+        &false,
     );
 
     // Create second stream 6 months later
     advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR / 2, start_time);
     let stream_id_2 = ctx.client.create_stream(
-        &sender, &receiver2, &ctx.token_id, &amount_per_stream,
-        &(start_time + SECONDS_PER_YEAR / 2), 
-        &(end_time + SECONDS_PER_YEAR / 2), 
-        &CurveType::Linear, &false,
+        &sender,
+        &receiver2,
+        &ctx.token_id,
+        &amount_per_stream,
+        &(start_time + SECONDS_PER_YEAR / 2),
+        &(end_time + SECONDS_PER_YEAR / 2),
+        &CurveType::Linear,
+        &false,
     );
 
     // Create third stream 1 year after first
-    advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR / 2, start_time + SECONDS_PER_YEAR / 2);
+    advance_time_and_extend_ttl(
+        &ctx.env,
+        SECONDS_PER_YEAR / 2,
+        start_time + SECONDS_PER_YEAR / 2,
+    );
     let stream_id_3 = ctx.client.create_stream(
-        &sender, &receiver3, &ctx.token_id, &amount_per_stream,
-        &(start_time + SECONDS_PER_YEAR), 
-        &(end_time + SECONDS_PER_YEAR), 
-        &CurveType::Linear, &false,
+        &sender,
+        &receiver3,
+        &ctx.token_id,
+        &amount_per_stream,
+        &(start_time + SECONDS_PER_YEAR),
+        &(end_time + SECONDS_PER_YEAR),
+        &CurveType::Linear,
+        &false,
     );
 
     // Jump forward 2 years from initial start
@@ -213,7 +267,10 @@ fn test_multiple_streams_ttl_survival() {
     let stream_3 = ctx.client.get_stream(&stream_id_3);
 
     assert!(!stream_1.cancelled, "Stream 1 should be live after 2 years");
-    assert!(!stream_2.cancelled, "Stream 2 should be live after 1.5 years");
+    assert!(
+        !stream_2.cancelled,
+        "Stream 2 should be live after 1.5 years"
+    );
     assert!(!stream_3.cancelled, "Stream 3 should be live after 1 year");
 
     // Test withdrawals work for all streams
@@ -226,7 +283,11 @@ fn test_multiple_streams_ttl_survival() {
     assert!(withdrawn_3 > 0, "Should be able to withdraw from stream 3");
 
     // Jump forward to 4 years total and verify all streams complete successfully
-    advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR * 2, start_time + SECONDS_PER_YEAR * 2);
+    advance_time_and_extend_ttl(
+        &ctx.env,
+        SECONDS_PER_YEAR * 2,
+        start_time + SECONDS_PER_YEAR * 2,
+    );
 
     // Final withdrawals
     ctx.client.withdraw(&stream_id_1, &receiver1);
@@ -239,9 +300,18 @@ fn test_multiple_streams_ttl_survival() {
     let final_balance_2 = token_client.balance(&receiver2);
     let final_balance_3 = token_client.balance(&receiver3);
 
-    assert!(final_balance_1 > 0, "Receiver 1 should have received tokens");
-    assert!(final_balance_2 > 0, "Receiver 2 should have received tokens");
-    assert!(final_balance_3 > 0, "Receiver 3 should have received tokens");
+    assert!(
+        final_balance_1 > 0,
+        "Receiver 1 should have received tokens"
+    );
+    assert!(
+        final_balance_2 > 0,
+        "Receiver 2 should have received tokens"
+    );
+    assert!(
+        final_balance_3 > 0,
+        "Receiver 3 should have received tokens"
+    );
 }
 
 /// Test TTL survival with paused streams
@@ -258,8 +328,14 @@ fn test_paused_stream_ttl_survival() {
     ctx.token.mint(&sender, &amount);
 
     let stream_id = ctx.client.create_stream(
-        &sender, &receiver, &ctx.token_id, &amount,
-        &start_time, &end_time, &CurveType::Linear, &false,
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &amount,
+        &start_time,
+        &end_time,
+        &CurveType::Linear,
+        &false,
     );
 
     // Pause the stream after 6 months
@@ -270,12 +346,22 @@ fn test_paused_stream_ttl_survival() {
     assert!(paused_stream.is_paused, "Stream should be paused");
 
     // Jump forward 2 years while paused
-    advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR * 2, start_time + SECONDS_PER_YEAR / 2);
+    advance_time_and_extend_ttl(
+        &ctx.env,
+        SECONDS_PER_YEAR * 2,
+        start_time + SECONDS_PER_YEAR / 2,
+    );
 
     // Verify stream is still live despite being paused for 2 years
     let stream_after_pause = ctx.client.get_stream(&stream_id);
-    assert!(!stream_after_pause.cancelled, "Paused stream should still be live after 2 years");
-    assert!(stream_after_pause.is_paused, "Stream should still be paused");
+    assert!(
+        !stream_after_pause.cancelled,
+        "Paused stream should still be live after 2 years"
+    );
+    assert!(
+        stream_after_pause.is_paused,
+        "Stream should still be paused"
+    );
 
     // Unpause and verify functionality
     ctx.client.unpause_stream(&stream_id, &sender);
@@ -287,12 +373,19 @@ fn test_paused_stream_ttl_survival() {
     assert!(withdrawn > 0, "Should be able to withdraw after unpausing");
 
     // Jump to end and complete the stream
-    advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR * 2, start_time + SECONDS_PER_YEAR * 2 + SECONDS_PER_YEAR / 2);
+    advance_time_and_extend_ttl(
+        &ctx.env,
+        SECONDS_PER_YEAR * 2,
+        start_time + SECONDS_PER_YEAR * 2 + SECONDS_PER_YEAR / 2,
+    );
     ctx.client.withdraw(&stream_id, &receiver);
 
     let token_client = token::Client::new(&ctx.env, &ctx.token_id);
     let final_balance = token_client.balance(&receiver);
-    assert!(final_balance > 0, "Receiver should have received tokens despite pause period");
+    assert!(
+        final_balance > 0,
+        "Receiver should have received tokens despite pause period"
+    );
 }
 
 /// Test TTL survival with stream cancellation and recreation
@@ -312,14 +405,23 @@ fn test_cancelled_stream_ttl_and_recreation() {
 
     // Create initial stream
     let stream_id_1 = ctx.client.create_stream(
-        &sender, &receiver, &ctx.token_id, &amount,
-        &start_time, &end_time, &CurveType::Linear, &false,
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &amount,
+        &start_time,
+        &end_time,
+        &CurveType::Linear,
+        &false,
     );
 
     // Jump forward 1 year and partially withdraw
     advance_time_and_extend_ttl(&ctx.env, SECONDS_PER_YEAR, start_time);
     let withdrawn_before_cancel = ctx.client.withdraw(&stream_id_1, &receiver);
-    assert!(withdrawn_before_cancel > 0, "Should withdraw some tokens before cancellation");
+    assert!(
+        withdrawn_before_cancel > 0,
+        "Should withdraw some tokens before cancellation"
+    );
 
     // Cancel the stream
     ctx.client.cancel(&stream_id_1, &sender);
@@ -331,16 +433,28 @@ fn test_cancelled_stream_ttl_and_recreation() {
 
     // Verify cancelled stream data is still accessible (TTL survived)
     let stream_after_ttl = ctx.client.get_stream(&stream_id_1);
-    assert!(stream_after_ttl.cancelled, "Cancelled stream data should still be accessible");
-    assert_eq!(stream_after_ttl.total_amount, amount, "Original amount should be preserved");
+    assert!(
+        stream_after_ttl.cancelled,
+        "Cancelled stream data should still be accessible"
+    );
+    assert_eq!(
+        stream_after_ttl.total_amount, amount,
+        "Original amount should be preserved"
+    );
 
     // Create a new stream to replace the cancelled one
     let new_start_time = start_time + (SECONDS_PER_YEAR * 2);
     let new_end_time = new_start_time + (SECONDS_PER_YEAR * 2);
-    
+
     let stream_id_2 = ctx.client.create_stream(
-        &sender, &receiver, &ctx.token_id, &amount,
-        &new_start_time, &new_end_time, &CurveType::Linear, &false,
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &amount,
+        &new_start_time,
+        &new_end_time,
+        &CurveType::Linear,
+        &false,
     );
 
     // Jump forward and complete the new stream
@@ -351,7 +465,10 @@ fn test_cancelled_stream_ttl_and_recreation() {
     // Verify both streams' data survived TTL
     let old_stream = ctx.client.get_stream(&stream_id_1);
     let new_stream = ctx.client.get_stream(&stream_id_2);
-    
+
     assert!(old_stream.cancelled, "Old stream should remain cancelled");
-    assert!(!new_stream.cancelled, "New stream should be completed, not cancelled");
+    assert!(
+        !new_stream.cancelled,
+        "New stream should be completed, not cancelled"
+    );
 }

@@ -4,7 +4,7 @@
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
-const LOG_LEVEL = (process.env.LOG_LEVEL || "info") as LogLevel;
+const LOG_LEVEL = (process.env.LOG_LEVEL ?? "info") as LogLevel;
 
 const LEVELS: Record<LogLevel, number> = {
   debug: 0,
@@ -23,7 +23,7 @@ function formatTimestamp(): string {
 
 function formatMessage(level: LogLevel, message: string, meta?: unknown): string {
   const timestamp = formatTimestamp();
-  const metaStr = meta ? ` ${JSON.stringify(meta)}` : "";
+  const metaStr = meta !== undefined ? ` ${JSON.stringify(meta)}` : "";
   return `[${timestamp}] [${level.toUpperCase()}] ${message}${metaStr}`;
 }
 
@@ -46,7 +46,7 @@ export const logger = {
     }
   },
 
-  error(message: string, error?: Error | unknown, meta?: unknown): void {
+  error(message: string, error?: unknown, meta?: unknown): void {
     if (shouldLog("error")) {
       const errorMeta = error instanceof Error
         ? { message: error.message, stack: error.stack, ...(meta as object) }

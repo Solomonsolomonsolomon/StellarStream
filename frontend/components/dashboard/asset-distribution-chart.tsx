@@ -250,7 +250,6 @@ export default function AssetDistributionChart({
               dataKey="usdValue"
               onMouseEnter={onPieEnter}
               onMouseLeave={onPieLeave}
-              activeIndex={activeIndex !== null ? activeIndex : undefined}
               activeShape={renderActiveShape}
             >
               {chartData.map((entry, index) => (

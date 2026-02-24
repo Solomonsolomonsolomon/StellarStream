@@ -6,6 +6,7 @@ import { SorobanRpc } from "@stellar/stellar-sdk";
 import { EventWatcherConfig, WatcherState, ParsedContractEvent } from "./types";
 import { logger } from "./logger";
 import { parseContractEvent, extractEventType } from "./event-parser";
+import { StreamLifecycleService, toBigIntOrNull, toObjectOrNull } from "./services/index.js";
 
 export class EventWatcher {
   private server: SorobanRpc.Server;
@@ -13,6 +14,7 @@ export class EventWatcher {
   private state: WatcherState;
   private isShuttingDown: boolean = false;
   private pollTimeout?: NodeJS.Timeout;
+  private streamLifecycleService: StreamLifecycleService;
 
   constructor(config: EventWatcherConfig) {
     this.config = config;
@@ -25,6 +27,7 @@ export class EventWatcher {
       isRunning: false,
       errorCount: 0,
     };
+    this.streamLifecycleService = new StreamLifecycleService();
 
     logger.info("EventWatcher initialized", {
       rpcUrl: config.rpcUrl,
@@ -56,16 +59,16 @@ export class EventWatcher {
   /**
    * Stop the event watcher gracefully
    */
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
     if (!this.state.isRunning) {
-      return;
+      return Promise.resolve();
     }
 
     logger.info("Stopping EventWatcher...");
     this.isShuttingDown = true;
     this.state.isRunning = false;
 
-    if (this.pollTimeout) {
+    if (this.pollTimeout !== undefined) {
       clearTimeout(this.pollTimeout);
     }
 
@@ -73,6 +76,8 @@ export class EventWatcher {
       lastProcessedLedger: this.state.lastProcessedLedger,
       totalErrors: this.state.errorCount,
     });
+
+    return Promise.resolve();
   }
 
   /**
@@ -149,7 +154,7 @@ export class EventWatcher {
       limit: 100, // Process up to 100 events per poll
     });
 
-    if (!response.events || response.events.length === 0) {
+    if (response.events.length === 0) {
       logger.debug("No new events found");
       
       // Update cursor to latest ledger even if no events
@@ -214,22 +219,40 @@ export class EventWatcher {
     eventType: string,
     event: ParsedContractEvent
   ): Promise<void> {
+    const eventData = toObjectOrNull(event.value);
+    if (!eventData) {
+      logger.debug("Event payload is not an object; skipping lifecycle indexing", {
+        eventType,
+        txHash: event.txHash,
+      });
+      return;
+    }
+
+    const normalizedEventType = eventType.toLowerCase();
+
     switch (eventType) {
+      case "create":
       case "stream_created":
+        await this.handleStreamCreated(event, eventData);
         logger.info("Stream created event detected", {
           txHash: event.txHash,
           ledger: event.ledger,
         });
         break;
 
+      case "claim":
       case "stream_withdrawn":
+        await this.handleStreamWithdrawn(event, eventData);
         logger.info("Withdrawal event detected", {
           txHash: event.txHash,
           ledger: event.ledger,
         });
         break;
 
+      case "cancel":
+      case "cancelled":
       case "stream_cancelled":
+        await this.handleStreamCancelled(event, eventData);
         logger.info("Cancellation event detected", {
           txHash: event.txHash,
           ledger: event.ledger,
@@ -237,8 +260,120 @@ export class EventWatcher {
         break;
 
       default:
-        logger.debug("Unhandled event type", { eventType });
+        logger.debug("Unhandled event type", { eventType: normalizedEventType });
     }
+  }
+
+  private async handleStreamCreated(
+    event: ParsedContractEvent,
+    eventData: Record<string, unknown>
+  ): Promise<void> {
+    const streamId = this.readStreamId(eventData);
+    const totalAmount =
+      toBigIntOrNull(eventData.total_amount) ?? toBigIntOrNull(eventData.amount);
+    const sender = this.readStringOrUnknown(eventData.sender);
+    const receiver = this.readStringOrUnknown(eventData.receiver);
+
+    if (streamId === null || streamId.length === 0 || totalAmount === null) {
+      logger.warn("Unable to index stream_created event due to missing fields", {
+        txHash: event.txHash,
+        streamId,
+        hasTotalAmount: totalAmount !== null,
+      });
+      return;
+    }
+
+    await this.streamLifecycleService.upsertCreatedStream({
+      streamId,
+      txHash: event.txHash,
+      sender,
+      receiver,
+      totalAmount,
+      createdAtIso: this.resolveEventTimestampIso(eventData.timestamp, event.ledgerClosedAt),
+      ledger: event.ledger,
+    });
+  }
+
+  private async handleStreamWithdrawn(
+    event: ParsedContractEvent,
+    eventData: Record<string, unknown>
+  ): Promise<void> {
+    const streamId = this.readStreamId(eventData);
+    const amount = toBigIntOrNull(eventData.amount);
+    if (streamId === null || streamId.length === 0 || amount === null) {
+      logger.warn("Unable to index stream_withdrawn event due to missing fields", {
+        txHash: event.txHash,
+        streamId,
+        hasAmount: amount !== null,
+      });
+      return;
+    }
+
+    await this.streamLifecycleService.registerWithdrawal({
+      streamId,
+      amount,
+      ledger: event.ledger,
+    });
+  }
+
+  private async handleStreamCancelled(
+    event: ParsedContractEvent,
+    eventData: Record<string, unknown>
+  ): Promise<void> {
+    const streamId = this.readStreamId(eventData);
+    const toReceiver = toBigIntOrNull(eventData.to_receiver);
+    const toSender = toBigIntOrNull(eventData.to_sender);
+    if (streamId === null || streamId.length === 0 || toReceiver === null || toSender === null) {
+      logger.warn("Unable to index stream_cancelled event due to missing fields", {
+        txHash: event.txHash,
+        streamId,
+        hasToReceiver: toReceiver !== null,
+        hasToSender: toSender !== null,
+      });
+      return;
+    }
+
+    const closedAtIso = this.resolveEventTimestampIso(eventData.timestamp, event.ledgerClosedAt);
+    const summary = await this.streamLifecycleService.cancelStream({
+      streamId,
+      toReceiver,
+      toSender,
+      closedAtIso,
+      ledger: event.ledger,
+    });
+
+    logger.info("Stream cancellation persisted", {
+      stream_id: summary.streamId,
+      status: "CANCELED",
+      closed_at: summary.closedAtIso,
+      final_streamed_amount: summary.finalStreamedAmount.toString(),
+      original_total_amount: summary.originalTotalAmount.toString(),
+      remaining_unstreamed_amount: summary.remainingUnstreamedAmount.toString(),
+    });
+  }
+
+  private readStreamId(eventData: Record<string, unknown>): string | null {
+    const streamId = toBigIntOrNull(eventData.stream_id);
+    return streamId === null ? null : streamId.toString();
+  }
+
+  private readStringOrUnknown(value: unknown): string {
+    return typeof value === "string" && value.length > 0 ? value : "unknown";
+  }
+
+  private resolveEventTimestampIso(
+    eventTimestamp: unknown,
+    fallbackIso: string
+  ): string {
+    const timestampSeconds = toBigIntOrNull(eventTimestamp);
+    if (timestampSeconds === null) {
+      return fallbackIso;
+    }
+    const timestampMs = Number(timestampSeconds) * 1000;
+    if (!Number.isFinite(timestampMs) || timestampMs <= 0) {
+      return fallbackIso;
+    }
+    return new Date(timestampMs).toISOString();
   }
 
   /**

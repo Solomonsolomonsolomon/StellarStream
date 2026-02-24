@@ -9,7 +9,10 @@ export default function NebulaSkeleton({
   variant = "card",
   className = "",
 }: NebulaSkeletonProps) {
-  const dimensions = {
+  const dimensions: Record<
+    NonNullable<NebulaSkeletonProps["variant"]>,
+    { width: string; height: string; minHeight?: string }
+  > = {
     card: { width: "380px", height: "auto", minHeight: "400px" },
     "bento-small": { width: "360px", height: "200px" },
     "bento-large": { width: "100%", height: "320px" },

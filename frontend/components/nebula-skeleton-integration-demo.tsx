@@ -4,7 +4,6 @@ import { useState, useEffect } from "react";
 import NebulaSkeleton from "./nebula-skeleton";
 import StreamSummaryCard from "./streamsummarycard";
 import XLMBalanceOrb from "./xlm-balance-orb";
-import VaultStrategyCard from "./vault-strategy-card";
 
 /**
  * Integration Demo: Shows how to use Nebula Skeleton with real components

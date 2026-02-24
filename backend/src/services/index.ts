@@ -1,4 +1,8 @@
 // Business logic and service layer
 // Handles stream calculations and data processing
 
-export {};
+export {
+  StreamLifecycleService,
+  toBigIntOrNull,
+  toObjectOrNull,
+} from "./stream-lifecycle-service.js";
