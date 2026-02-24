@@ -6,6 +6,11 @@ import { SorobanRpc } from "@stellar/stellar-sdk";
 import { EventWatcherConfig, WatcherState, ParsedContractEvent } from "./types";
 import { logger } from "./logger";
 import { parseContractEvent, extractEventType } from "./event-parser";
+import { scValToNative, xdr } from "@stellar/stellar-sdk";
+import { PrismaClient } from "./generated/client/client.js";
+
+// @ts-ignore
+const prisma = new PrismaClient();
 
 export class EventWatcher {
   private server: SorobanRpc.Server;
@@ -151,7 +156,7 @@ export class EventWatcher {
 
     if (!response.events || response.events.length === 0) {
       logger.debug("No new events found");
-      
+
       // Update cursor to latest ledger even if no events
       const latestLedger = await this.server.getLatestLedger();
       this.state.lastProcessedLedger = latestLedger.sequence;
@@ -163,7 +168,7 @@ export class EventWatcher {
     // Process each event
     for (const event of response.events) {
       await this.processEvent(event);
-      
+
       // Update cursor after each event
       if (event.ledger > this.state.lastProcessedLedger) {
         this.state.lastProcessedLedger = event.ledger;
@@ -220,6 +225,49 @@ export class EventWatcher {
           txHash: event.txHash,
           ledger: event.ledger,
         });
+
+        try {
+          let sender = "";
+          let receiver = "";
+          let amount = "0";
+          let duration = 0;
+
+          // Attempt to extract from Topics (using requested fromXdr and scValToNative)
+          if (event.topics && event.topics.length > 1) {
+            const senderVal = xdr.ScVal.fromXDR(event.topics[1], "base64");
+            sender = String(scValToNative(senderVal));
+          }
+
+          // Extract further data from the parsed value
+          const data = event.value as any;
+          if (Array.isArray(data)) {
+            // Assume [receiver, amount, duration] or similar
+            receiver = data[0] ? String(data[0]) : "";
+            amount = data[1] ? String(data[1]) : "0";
+            duration = data[2] ? Number(data[2]) : 0;
+          } else if (typeof data === "object" && data !== null) {
+            // Assume named fields struct
+            receiver = data.receiver ? String(data.receiver) : "";
+            amount = data.amount ? String(data.amount) : "0";
+            duration = data.duration ? Number(data.duration) : 0;
+            if (!sender && data.sender) {
+              sender = String(data.sender);
+            }
+          }
+
+          await prisma.stream.create({
+            data: {
+              txHash: event.txHash,
+              sender,
+              receiver,
+              amount,
+              duration,
+            },
+          });
+          logger.info("Stream successfully saved to Prisma DB", { txHash: event.txHash });
+        } catch (error) {
+          logger.error("Failed to decode or save StreamCreated event", error);
+        }
         break;
 
       case "stream_withdrawn":
