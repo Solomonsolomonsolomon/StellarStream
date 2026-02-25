@@ -2,22 +2,38 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
   output   = "../src/generated/client"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
+// Mirrors the Stream state from the Soroban smart contract
 model Stream {
-  id        String   @id @default(uuid())
-  streamId  String?  @unique
-  txHash    String   @unique
-  sender    String
-  receiver  String
-  amount    String   // Using String to prevent bounds issues with BigInt
-  withdrawn String   @default("0")
-  duration  Int
-  createdAt DateTime @default(now())
+  id              String       @id // Primary Key from Contract (Contract Stream ID)
+  sender          String
+  receiver        String
+  tokenAddress    String
+  amountPerSecond BigInt
+  totalAmount     BigInt
+  status          StreamStatus @default(ACTIVE)
+
+  @@index([sender])
+  @@index([receiver])
+}
+
+// Tracks the last synced blockchain ledger sequence
+model SyncState {
+  id                 Int @id @default(1)
+  lastLedgerSequence Int @default(0)
+}
+
+enum StreamStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELED
 }
