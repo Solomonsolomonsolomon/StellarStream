@@ -10,6 +10,7 @@ import { getNonce, getMe } from './api/auth.js';
 import { ensureRedis, closeRedis } from './lib/redis.js';
 import { prisma } from './lib/db.js';
 import batchRoutes from './api/routes.js';
+import healthRoutes from './api/health.routes.js';
 
 const app: Express = express();
 const PORT = process.env.PORT ?? 3000;
@@ -99,6 +100,7 @@ start().catch((err) => {
   process.exit(1);
 // Batch metadata endpoint for bulk streaming queries
 app.use(batchRoutes);
+app.use(healthRoutes);
 
 app.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
