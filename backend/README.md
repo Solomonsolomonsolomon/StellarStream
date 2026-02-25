@@ -8,6 +8,11 @@ Backend service for indexing and serving Stellar payment stream data.
 npm install
 ```
 
+Copy the environment file and configure:
+```bash
+cp .env.example .env
+```
+
 ## Development
 
 ```bash
@@ -43,3 +48,7 @@ npm start
   /services   - Business logic layer
   /types      - TypeScript type definitions
 ```
+
+## Security
+
+The backend implements production-grade security features including CORS restrictions and secure HTTP headers via Helmet.js. See [SECURITY.md](./SECURITY.md) for detailed configuration and best practices.
