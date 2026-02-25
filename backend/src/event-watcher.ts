@@ -9,6 +9,12 @@ import { parseContractEvent, extractEventType } from "./event-parser";
 import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import { PrismaClient } from "./generated/client/client.js";
 import { LedgerVerificationService } from "./services/ledger-verification.service.js";
+import { AuditLogService } from "./services/audit-log.service";
+import {
+  StreamLifecycleService,
+  toBigIntOrNull,
+  toObjectOrNull,
+} from "./services/stream-lifecycle-service";
 
 // @ts-expect-error Prisma Client may not be generated yet
 const prisma = new PrismaClient();
@@ -22,6 +28,7 @@ export class EventWatcher {
   private pollTimeout?: NodeJS.Timeout;
   private streamLifecycleService: StreamLifecycleService;
   private verificationService: LedgerVerificationService;
+  private auditLogService: AuditLogService;
 
   constructor(config: EventWatcherConfig) {
     this.config = config;
@@ -42,6 +49,7 @@ export class EventWatcher {
       this.horizonServer,
       prisma
     );
+    this.auditLogService = new AuditLogService();
 
     logger.info("EventWatcher initialized", {
       rpcUrl: config.rpcUrl,
@@ -410,6 +418,19 @@ export class EventWatcher {
       createdAtIso: this.resolveEventTimestampIso(eventData.timestamp, event.ledgerClosedAt),
       ledger: event.ledger,
     });
+
+    // Log to audit log
+    await this.auditLogService.logEvent({
+      eventType: "create",
+      streamId,
+      txHash: event.txHash,
+      ledger: event.ledger,
+      ledgerClosedAt: event.ledgerClosedAt,
+      sender,
+      receiver,
+      amount: totalAmount,
+      metadata: eventData,
+    });
   }
 
   private async handleStreamWithdrawn(
@@ -431,6 +452,17 @@ export class EventWatcher {
       streamId,
       amount,
       ledger: event.ledger,
+    });
+
+    // Log to audit log
+    await this.auditLogService.logEvent({
+      eventType: "withdraw",
+      streamId,
+      txHash: event.txHash,
+      ledger: event.ledger,
+      ledgerClosedAt: event.ledgerClosedAt,
+      amount,
+      metadata: eventData,
     });
   }
 
@@ -467,6 +499,21 @@ export class EventWatcher {
       final_streamed_amount: summary.finalStreamedAmount.toString(),
       original_total_amount: summary.originalTotalAmount.toString(),
       remaining_unstreamed_amount: summary.remainingUnstreamedAmount.toString(),
+    });
+
+    // Log to audit log
+    await this.auditLogService.logEvent({
+      eventType: "cancel",
+      streamId,
+      txHash: event.txHash,
+      ledger: event.ledger,
+      ledgerClosedAt: event.ledgerClosedAt,
+      amount: toReceiver + toSender,
+      metadata: {
+        ...eventData,
+        to_receiver: toReceiver.toString(),
+        to_sender: toSender.toString(),
+      },
     });
   }
 

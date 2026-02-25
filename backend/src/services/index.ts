@@ -8,3 +8,10 @@ export {
 } from "./stream-lifecycle-service.js";
 
 export { LedgerVerificationService } from "./ledger-verification.service.js";
+export { AuditLogService } from "./audit-log.service.js";
+export {
+  BatchMetadataService,
+  type BatchMetadataResponse,
+  type StreamMetadataResult,
+  type StreamMetadataError,
+} from "./batch-metadata.service.js";
