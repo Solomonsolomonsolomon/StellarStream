@@ -1,12 +1,17 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { StreamService } from "../services/stream.service";
+import {
+  CurveTypeInput,
+  StreamFeeEstimationService,
+} from "../services/stream-fee-estimation.service";
 import validateRequest from "../middleware/validateRequest";
 import stellarAddressSchema from "../validation/stellar";
 import asyncHandler from "../utils/asyncHandler";
 
 const router = Router();
 const streamService = new StreamService();
+const streamFeeEstimationService = new StreamFeeEstimationService();
 
 const getStreamsParamsSchema = z.object({
   address: stellarAddressSchema,
@@ -16,6 +21,19 @@ const getStreamsQuerySchema = z.object({
   direction: z.enum(["inbound", "outbound"]).optional(),
   status: z.enum(["active", "paused", "completed"]).optional(),
   tokens: z.string().optional(),
+});
+
+const estimateFeeBodySchema = z.object({
+  sender: stellarAddressSchema,
+  receiver: stellarAddressSchema,
+  token: stellarAddressSchema,
+  totalAmount: z.string().regex(/^\d+$/, {
+    message: "totalAmount must be an integer string in stroops.",
+  }),
+  startTime: z.number().int().positive(),
+  endTime: z.number().int().positive(),
+  curveType: z.enum(["linear", "exponential"]).default("linear"),
+  isSoulbound: z.boolean().default(false),
 });
 
 /**
@@ -57,6 +75,44 @@ router.get(
       count: streams.length,
       filters,
       streams,
+    });
+  })
+);
+
+/**
+ * POST /api/v1/streams/estimate-fee
+ * Estimates Soroban fee (resource + inclusion) for create_stream in XLM.
+ */
+router.post(
+  "/streams/estimate-fee",
+  validateRequest({
+    body: estimateFeeBodySchema,
+  }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const body = req.body as z.infer<typeof estimateFeeBodySchema>;
+
+    if (body.endTime <= body.startTime) {
+      res.status(400).json({
+        success: false,
+        error: "endTime must be greater than startTime.",
+      });
+      return;
+    }
+
+    const estimate = await streamFeeEstimationService.estimateCreateStreamFee({
+      sender: body.sender,
+      receiver: body.receiver,
+      token: body.token,
+      totalAmount: body.totalAmount,
+      startTime: body.startTime,
+      endTime: body.endTime,
+      curveType: body.curveType as CurveTypeInput,
+      isSoulbound: body.isSoulbound,
+    });
+
+    res.json({
+      success: true,
+      estimate,
     });
   })
 );
