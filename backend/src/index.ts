@@ -76,6 +76,11 @@ app.use(healthRoutes);
 
 async function start(): Promise<void> {
   await ensureRedis();
+  
+  // Batch metadata endpoint for bulk streaming queries
+  app.use(batchRoutes);
+  app.use(healthRoutes);
+  
   app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
   });
