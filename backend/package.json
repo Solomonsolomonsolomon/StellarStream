@@ -14,12 +14,7 @@
     "db:generate": "prisma generate",
     "db:studio": "prisma studio"
   },
-  "keywords": [
-    "stellar",
-    "blockchain",
-    "streaming",
-    "payments"
-  ],
+  "keywords": ["stellar", "blockchain", "streaming", "payments"],
   "author": "",
   "license": "MIT",
   "dependencies": {
