@@ -7,6 +7,7 @@ import { logger } from "../logger";
 import streamsRouter from "./streams.routes";
 import yieldRouter from "./yield.routes.js";
 import snapshotRouter from "./snapshot.routes";
+import governanceRouter from "./governance.routes.js";
 
 const router = Router();
 
@@ -14,6 +15,7 @@ const router = Router();
 router.use("/v1", streamsRouter);
 router.use("/v1/yield", yieldRouter);
 router.use("/v1/snapshots", snapshotRouter);
+router.use("/v1", governanceRouter);
 const auditLogService = new AuditLogService();
 
 /**
@@ -79,4 +81,3 @@ router.get("/audit-log/:streamId", async (req: Request, res: Response) => {
 });
 
 export default router;
-
