@@ -43,9 +43,9 @@ use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
 use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
 use types::{
-    ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent,
-    ProposalCreatedEvent, RequestCreatedEvent,
-    RequestExecutedEvent, RequestKey, RequestStatus, Role, Stream, StreamCreatedEvent, StreamProposal, StreamReceipt,
+    ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent,
+    RequestCreatedEvent, RequestExecutedEvent, RequestKey, RequestStatus, Role, Stream,
+    StreamCreatedEvent, StreamProposal, StreamReceipt,
 };
 
 #[contract]
