@@ -40,7 +40,9 @@ mod voting_test;
 mod ttl_stress_test;
 
 use errors::Error;
-use soroban_sdk::{contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Vec,
+};
 use storage::{PROPOSAL_COUNT, RECEIPT, RESTRICTED_ADDRESSES, STREAM_COUNT};
 use types::{
     ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent,
@@ -526,7 +528,9 @@ impl StellarStreamContract {
                 new_list.push_back(a.clone());
             }
         }
-        env.storage().instance().set(&RESTRICTED_ADDRESSES, &new_list);
+        env.storage()
+            .instance()
+            .set(&RESTRICTED_ADDRESSES, &new_list);
     }
 
     pub fn get_restricted_addresses(env: Env) -> Vec<Address> {
@@ -991,15 +995,11 @@ impl StellarStreamContract {
     }
 
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<StreamProposal> {
-        env.storage()
-            .instance()
-            .get(&(PROPOSAL_COUNT, proposal_id))
+        env.storage().instance().get(&(PROPOSAL_COUNT, proposal_id))
     }
 
     pub fn get_receipt(env: Env, stream_id: u64) -> Option<StreamReceipt> {
-        env.storage()
-            .instance()
-            .get(&(RECEIPT, stream_id))
+        env.storage().instance().get(&(RECEIPT, stream_id))
     }
 
     pub fn get_receipt_metadata(env: Env, stream_id: u64) -> Result<ReceiptMetadata, Error> {
