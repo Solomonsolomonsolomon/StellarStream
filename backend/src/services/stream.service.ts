@@ -4,7 +4,7 @@ import { StreamStatus } from "../generated/client";
 export type StreamDirection = "inbound" | "outbound";
 export type StreamStatusFilter = "active" | "paused" | "completed";
 
-interface StreamFilters {
+export interface StreamFilters {
   direction?: StreamDirection;
   status?: StreamStatusFilter;
   tokenAddresses?: string[];
