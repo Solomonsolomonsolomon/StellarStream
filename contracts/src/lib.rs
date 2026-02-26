@@ -12,6 +12,13 @@ mod types;
 mod vault;
 mod voting;
 
+#[cfg(test)]
+mod remaining_time_test;
+
+#[cfg(test)]
+mod stream_active_test;
+
+#[cfg(test)]
 #[cfg(all(test, feature = "allowlist_tests"))]
 mod allowlist_test;
 #[cfg(all(test, feature = "clawback_tests"))]
@@ -605,6 +612,34 @@ impl StellarStreamContract {
             .instance()
             .get(&(STREAM_COUNT, stream_id))
             .ok_or(Error::StreamNotFound)
+    }
+
+    pub fn get_stream_remaining_time(env: Env, stream_id: u64) -> Result<u64, Error> {
+        let stream: Stream = env
+            .storage()
+            .instance()
+            .get(&(STREAM_COUNT, stream_id))
+            .ok_or(Error::StreamNotFound)?;
+
+        let current_time = env.ledger().timestamp();
+
+        if current_time >= stream.end_time {
+            Ok(0)
+        } else {
+            Ok(stream.end_time - current_time)
+        }
+    }
+
+    pub fn is_stream_active(env: Env, stream_id: u64) -> bool {
+        let stream: Option<Stream> = env.storage().instance().get(&(STREAM_COUNT, stream_id));
+
+        match stream {
+            None => false,
+            Some(s) => {
+                let current_time = env.ledger().timestamp();
+                !s.cancelled && !s.is_frozen && !s.is_paused && current_time < s.end_time
+            }
+        }
     }
 
     pub fn get_soulbound_streams(env: Env) -> Vec<u64> {
