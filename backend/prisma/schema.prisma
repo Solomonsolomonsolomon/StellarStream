@@ -102,6 +102,22 @@ model StreamArchive {
   @@index([createdAt])
 }
 
+// Governance proposal state indexed from DAO contract events
+model Proposal {
+  id           String   @id // Contract-level proposal ID
+  creator      String
+  description  String
+  quorum       Int
+  votesFor     Int      @default(0)
+  votesAgainst Int      @default(0)
+  txHash       String   @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([creator])
+  @@index([createdAt])
+}
+
 enum StreamStatus {
   ACTIVE
   PAUSED
