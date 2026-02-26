@@ -19,3 +19,4 @@ export {
 export { SnapshotService } from "./snapshot.service.js";
 export { scheduleSnapshotMaintenance, runMaintenanceNow } from "./snapshot.scheduler.js";
 export { WebhookService } from "./webhook.service.js";
+export { BridgeListenerService, type BridgeLandingEvent } from "./bridge-listener.service.js";
