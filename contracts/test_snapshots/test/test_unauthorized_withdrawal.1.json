@@ -77,8 +77,16 @@
                   "u64": 0
                 },
                 {
+                  "u64": 50
+                },
+                {
                   "u64": 100
-                }
+                },
+                {
+                  "u32": 2
+                },
+                "void",
+                "void"
               ]
             }
           },
@@ -233,11 +241,44 @@
                     },
                     {
                       "key": {
+                        "symbol": "cliff_time"
+                      },
+                      "val": {
+                        "u64": 50
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "deposited_principal"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 100
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "end_time"
                       },
                       "val": {
                         "u64": 100
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "interest_strategy"
+                      },
+                      "val": {
+                        "u32": 2
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "metadata"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -273,6 +314,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "vault_address"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "withdrawn_amount"
                       },
                       "val": {
@@ -288,7 +335,7 @@
             },
             "ext": "v0"
           },
-          4095
+          1036800
         ]
       ],
       [
@@ -333,7 +380,7 @@
             },
             "ext": "v0"
           },
-          4095
+          1036800
         ]
       ],
       [
@@ -678,7 +725,7 @@
             },
             "ext": "v0"
           },
-          4095
+          1036800
         ]
       ]
     ]

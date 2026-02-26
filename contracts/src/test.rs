@@ -7,9 +7,7 @@ use soroban_sdk::{token, Address, Env};
 #[allow(dead_code)]
 struct TestContext {
     env: Env,
-    contract_id: Address,
     client: StellarStreamClient<'static>,
-    token_admin: Address,
     token: token::StellarAssetClient<'static>,
     token_id: Address,
 }
@@ -24,17 +22,15 @@ fn setup_test() -> TestContext {
 
     let token_admin = Address::generate(&env);
 
-    #[allow(deprecated)]
-    let token_id = env.register_stellar_asset_contract(token_admin.clone());
-    let token = token::StellarAssetClient::new(&env, &token_id);
+    // v22 Change: Use v2 method to avoid deprecation warning
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = token::StellarAssetClient::new(&env, &token_id.address());
 
     TestContext {
         env,
-        contract_id,
         client,
-        token_admin,
         token,
-        token_id,
+        token_id: token_id.address(),
     }
 }
 
@@ -59,6 +55,9 @@ fn test_full_stream_cycle() {
         &start_time,
         &cliff_time,
         &end_time,
+        &2,
+        &None,
+        &None,
     );
 
     // v22 Change: ledger().with_mut() -> ledger().set()
@@ -89,9 +88,18 @@ fn test_unauthorized_withdrawal() {
     let thief = Address::generate(&ctx.env);
 
     ctx.token.mint(&sender, &100);
-    let stream_id =
-        ctx.client
-            .create_stream(&sender, &receiver, &ctx.token_id, &100, &0, &50, &100);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &100,
+        &0,
+        &50,
+        &100,
+        &2,
+           &None,
+           &None,
+    );
 
     ctx.client.withdraw(&stream_id, &thief);
 }
@@ -104,9 +112,18 @@ fn test_cancellation_split() {
     let amount = 1000_i128;
 
     ctx.token.mint(&sender, &amount);
-    let stream_id =
-        ctx.client
-            .create_stream(&sender, &receiver, &ctx.token_id, &amount, &0, &100, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &amount,
+        &0,
+        &100,
+        &1000,
+        &2,
+           &None,
+           &None,
+    );
 
     // Jump to 25% (250 seconds in)
     ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
@@ -128,6 +145,118 @@ fn test_cancellation_split() {
 }
 
 #[test]
+fn test_protocol_fee() {
+    let ctx = setup_test();
+    let admin = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+    let sender = Address::generate(&ctx.env);
+    let receiver = Address::generate(&ctx.env);
+
+    // Initialize contract with admin (grants all roles)
+    ctx.client.initialize(&admin);
+    ctx.client.initialize_fee(&admin, &100, &treasury);
+
+    ctx.token.mint(&sender, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &100,
+        &1000,
+        &2,
+        &None,
+        &None,
+    );
+
+    assert_eq!(stream_id, 1);
+
+    let token_client = token::Client::new(&ctx.env, &ctx.token_id);
+    assert_eq!(token_client.balance(&treasury), 10);
+    assert_eq!(token_client.balance(&ctx.contract_id), 990);
+}
+
+#[test]
+fn test_transfer_receiver() {
+    let ctx = setup_test();
+    let sender = Address::generate(&ctx.env);
+    let old_receiver = Address::generate(&ctx.env);
+    let new_receiver = Address::generate(&ctx.env);
+
+    ctx.token.mint(&sender, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &old_receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &100,
+        &1000,
+        &2,
+           &None,
+           &None,
+    );
+
+    ctx.client.transfer_receiver(&stream_id, &new_receiver);
+
+    ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        timestamp: 500,
+        protocol_version: 22,
+        sequence_number: 1,
+        network_id: [0u8; 32],
+        base_reserve: 0,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: 1000000,
+    });
+
+    let withdrawn = ctx.client.withdraw(&stream_id, &new_receiver);
+    assert_eq!(withdrawn, 500);
+
+    let token_client = token::Client::new(&ctx.env, &ctx.token_id);
+    assert_eq!(token_client.balance(&new_receiver), 500);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorized: You are not the receiver of this stream")]
+fn test_old_receiver_cannot_withdraw_after_transfer() {
+    let ctx = setup_test();
+    let sender = Address::generate(&ctx.env);
+    let old_receiver = Address::generate(&ctx.env);
+    let new_receiver = Address::generate(&ctx.env);
+
+    ctx.token.mint(&sender, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &old_receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &100,
+        &1000,
+        &2,
+           &None,
+           &None,
+    );
+
+    ctx.client.transfer_receiver(&stream_id, &new_receiver);
+
+    ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        timestamp: 500,
+        protocol_version: 22,
+        sequence_number: 1,
+        network_id: [0u8; 32],
+        base_reserve: 0,
+        min_temp_entry_ttl: 0,
+        min_persistent_entry_ttl: 0,
+        max_entry_ttl: 1000000,
+    });
+
+    ctx.client.withdraw(&stream_id, &old_receiver);
+}
+
+#[test]
 fn test_batch_stream_creation() {
     let ctx = setup_test();
     let sender = Address::generate(&ctx.env);
@@ -145,6 +274,9 @@ fn test_batch_stream_creation() {
         start_time: 0,
         cliff_time: 100,
         end_time: 1000,
+        interest_strategy: 2,
+        vault_address: None,
+        metadata: None,
     });
     requests.push_back(StreamRequest {
         receiver: receiver2.clone(),
@@ -152,6 +284,9 @@ fn test_batch_stream_creation() {
         start_time: 0,
         cliff_time: 100,
         end_time: 1000,
+        interest_strategy: 2,
+        vault_address: None,
+        metadata: None,
     });
     requests.push_back(StreamRequest {
         receiver: receiver3.clone(),
@@ -159,6 +294,9 @@ fn test_batch_stream_creation() {
         start_time: 0,
         cliff_time: 100,
         end_time: 1000,
+        interest_strategy: 2,
+        vault_address: None,
+        metadata: None,
     });
 
     let stream_ids = ctx
@@ -186,8 +324,18 @@ fn test_pause_blocks_create_stream() {
     ctx.client.set_pause(&admin, &true);
 
     ctx.token.mint(&sender, &1000);
-    ctx.client
-        .create_stream(&sender, &receiver, &ctx.token_id, &1000, &0, &100, &1000);
+    ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &100,
+        &1000,
+        &2,
+           &None,
+           &None,
+    );
 }
 
 #[test]
@@ -200,9 +348,18 @@ fn test_pause_blocks_withdraw() {
 
     ctx.client.initialize(&admin);
     ctx.token.mint(&sender, &1000);
-    let stream_id =
-        ctx.client
-            .create_stream(&sender, &receiver, &ctx.token_id, &1000, &0, &100, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &100,
+        &1000,
+        &2,
+           &None,
+           &None,
+    );
 
     ctx.client.set_pause(&admin, &true);
 
@@ -221,6 +378,30 @@ fn test_pause_blocks_withdraw() {
 }
 
 #[test]
+#[should_panic(expected = "Fee cannot exceed 10%")]
+fn test_fee_cap() {
+    let ctx = setup_test();
+    let admin = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+
+    // Initialize contract with admin (grants all roles)
+    ctx.client.initialize(&admin);
+    ctx.client.initialize_fee(&admin, &1001, &treasury);
+}
+
+#[test]
+fn test_update_fee() {
+    let ctx = setup_test();
+    let admin = Address::generate(&ctx.env);
+    let treasury = Address::generate(&ctx.env);
+
+    // Initialize contract with admin (grants all roles)
+    ctx.client.initialize(&admin);
+    ctx.client.initialize_fee(&admin, &100, &treasury);
+    ctx.client.update_fee(&admin, &200);
+}
+
+#[test]
 #[should_panic(expected = "No funds available to withdraw at this time")]
 fn test_cliff_blocks_withdrawal() {
     let ctx = setup_test();
@@ -228,9 +409,18 @@ fn test_cliff_blocks_withdrawal() {
     let receiver = Address::generate(&ctx.env);
 
     ctx.token.mint(&sender, &1000);
-    let stream_id =
-        ctx.client
-            .create_stream(&sender, &receiver, &ctx.token_id, &1000, &0, &500, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &500,
+        &1000,
+        &2,
+           &None,
+           &None,
+    );
 
     ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
         timestamp: 250,
@@ -253,9 +443,18 @@ fn test_cliff_unlocks_at_cliff_time() {
     let receiver = Address::generate(&ctx.env);
 
     ctx.token.mint(&sender, &1000);
-    let stream_id =
-        ctx.client
-            .create_stream(&sender, &receiver, &ctx.token_id, &1000, &0, &500, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &500,
+        &1000,
+        &2,
+           &None,
+           &None,
+    );
 
     ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
         timestamp: 500,
@@ -283,9 +482,18 @@ fn test_unpause_allows_operations() {
     ctx.client.set_pause(&admin, &false);
 
     ctx.token.mint(&sender, &1000);
-    let stream_id =
-        ctx.client
-            .create_stream(&sender, &receiver, &ctx.token_id, &1000, &0, &100, &1000);
+    let stream_id = ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &1000,
+        &0,
+        &100,
+        &1000,
+        &2,
+        &None,
+        &None,
+    );
 
     ctx.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
         timestamp: 500,
@@ -311,6 +519,16 @@ fn test_invalid_cliff_time() {
     let receiver = Address::generate(&ctx.env);
 
     ctx.token.mint(&sender, &1000);
-    ctx.client
-        .create_stream(&sender, &receiver, &ctx.token_id, &1000, &100, &50, &200);
+    ctx.client.create_stream(
+        &sender,
+        &receiver,
+        &ctx.token_id,
+        &1000,
+        &100,
+        &50,
+        &200,
+        &2,
+           &None,
+           &None,
+    );
 }
