@@ -7,6 +7,7 @@ export {
   toObjectOrNull,
 } from "./stream-lifecycle-service.js";
 
+export { LedgerVerificationService } from "./ledger-verification.service.js";
 export { AuditLogService } from "./audit-log.service.js";
 export {
   BatchMetadataService,

@@ -57,3 +57,10 @@ enum StreamStatus {
   COMPLETED
   CANCELED
 }
+
+// Stores ledger hashes for integrity verification against Horizon API
+model LedgerHash {
+  sequence  Int      @id
+  hash      String
+  createdAt DateTime @default(now())
+}
