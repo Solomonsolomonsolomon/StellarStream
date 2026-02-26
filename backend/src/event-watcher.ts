@@ -2,47 +2,66 @@
  * Core event watcher service for Stellar blockchain
  */
 
-import { SorobanRpc } from "@stellar/stellar-sdk";
+import { SorobanRpc, Horizon } from "@stellar/stellar-sdk";
 import { EventWatcherConfig, WatcherState, ParsedContractEvent } from "./types";
 import { logger } from "./logger";
-import { parseContractEvent, extractEventType } from "./event-parser";
+import {
+  parseContractEvent,
+  extractEventType,
+  parseProposalCreatedEventXdr,
+} from "./event-parser";
 import { scValToNative, xdr } from "@stellar/stellar-sdk";
-import { PrismaClient } from "./generated/client/client.js";
+import { PrismaClient } from "./generated/client/index.js";
+import { LedgerVerificationService } from "./services/ledger-verification.service.js";
 import { AuditLogService } from "./services/audit-log.service";
 import {
   StreamLifecycleService,
   toBigIntOrNull,
   toObjectOrNull,
 } from "./services/stream-lifecycle-service";
+import { WebhookService } from "./services/webhook.service";
+import * as Sentry from "@sentry/node";
 
-// @ts-expect-error Prisma Client may not be generated yet
+
 const prisma = new PrismaClient();
 
 export class EventWatcher {
   private server: SorobanRpc.Server;
+  private horizonServer: Horizon.Server;
   private config: EventWatcherConfig;
   private state: WatcherState;
   private isShuttingDown: boolean = false;
   private pollTimeout?: NodeJS.Timeout;
   private streamLifecycleService: StreamLifecycleService;
+  private verificationService: LedgerVerificationService;
   private auditLogService: AuditLogService;
+  private webhookService: WebhookService;
 
   constructor(config: EventWatcherConfig) {
     this.config = config;
     this.server = new SorobanRpc.Server(config.rpcUrl, {
       allowHttp: config.rpcUrl.startsWith("http://"),
     });
+    this.horizonServer = new Horizon.Server(config.horizonUrl);
 
     this.state = {
       lastProcessedLedger: 0,
       isRunning: false,
       errorCount: 0,
+      ledgersSinceLastVerification: 0,
+      lastVerifiedLedger: 0,
     };
     this.streamLifecycleService = new StreamLifecycleService();
+    this.verificationService = new LedgerVerificationService(
+      this.horizonServer,
+      prisma
+    );
     this.auditLogService = new AuditLogService();
+    this.webhookService = new WebhookService();
 
     logger.info("EventWatcher initialized", {
       rpcUrl: config.rpcUrl,
+      horizonUrl: config.horizonUrl,
       contractId: config.contractId,
       pollInterval: config.pollIntervalMs,
     });
@@ -122,6 +141,15 @@ export class EventWatcher {
         // Wait before next poll
         await this.sleep(this.config.pollIntervalMs);
       } catch (error) {
+
+        Sentry.withScope((scope) => {
+          scope.setTag("failure_type", "indexer_failure");
+          scope.setContext("indexer", {
+            lastProcessedLedger: this.state.lastProcessedLedger,
+            errorCount: this.state.errorCount,
+          });
+          Sentry.captureException(error);
+        });
         this.state.errorCount++;
         this.state.lastError = error instanceof Error ? error : new Error(String(error));
 
@@ -172,11 +200,19 @@ export class EventWatcher {
 
       // Update cursor to latest ledger even if no events
       const latestLedger = await this.server.getLatestLedger();
+      const previousLedger = this.state.lastProcessedLedger;
       this.state.lastProcessedLedger = latestLedger.sequence;
+
+      // Track ledgers for verification even when idle
+      this.state.ledgersSinceLastVerification +=
+        this.state.lastProcessedLedger - previousLedger;
+      await this.maybeVerifyLedgers();
       return;
     }
 
     logger.info(`Found ${response.events.length} new events`);
+
+    const previousLedger = this.state.lastProcessedLedger;
 
     // Process each event
     for (const event of response.events) {
@@ -187,6 +223,14 @@ export class EventWatcher {
         this.state.lastProcessedLedger = event.ledger;
       }
     }
+
+    // Store ledger hash for the current batch
+    await this.storeLedgerHash(this.state.lastProcessedLedger);
+
+    // Track ledgers processed since last verification
+    this.state.ledgersSinceLastVerification +=
+      this.state.lastProcessedLedger - previousLedger;
+    await this.maybeVerifyLedgers();
 
     logger.debug("Events processed", {
       count: response.events.length,
@@ -221,7 +265,7 @@ export class EventWatcher {
     });
 
     // Here you can add custom handlers for specific event types
-    await this.handleEventByType(eventType, parsed);
+    await this.handleEventByType(eventType, parsed, event);
   }
 
   /**
@@ -230,7 +274,8 @@ export class EventWatcher {
    */
   private async handleEventByType(
     eventType: string,
-    event: ParsedContractEvent
+    event: ParsedContractEvent,
+    rawEvent: SorobanRpc.Api.EventResponse
   ): Promise<void> {
     const eventData = toObjectOrNull(event.value);
     if (!eventData) {
@@ -246,6 +291,19 @@ export class EventWatcher {
     switch (eventType) {
       case "create":
       case "stream_created":
+        {
+          const proposal = parseProposalCreatedEventXdr(rawEvent);
+          if (proposal) {
+            await this.handleProposalCreated(event, proposal);
+            logger.info("Governance proposal created event detected", {
+              txHash: event.txHash,
+              ledger: event.ledger,
+              proposalId: proposal.id,
+            });
+            break;
+          }
+        }
+
         await this.handleStreamCreated(event, eventData);
         logger.info("Stream created event detected", {
           txHash: event.txHash,
@@ -285,7 +343,22 @@ export class EventWatcher {
             }
           }
 
-          await prisma.stream.create({
+          await (
+            prisma as unknown as {
+              stream: {
+                create: (arg: {
+                  data: {
+                    txHash: string;
+                    streamId: string | null;
+                    sender: string;
+                    receiver: string;
+                    amount: string;
+                    duration: number | null;
+                  };
+                }) => Promise<unknown>;
+              };
+            }
+          ).stream.create({
             data: {
               txHash: event.txHash,
               streamId: streamId || null,
@@ -296,6 +369,26 @@ export class EventWatcher {
             },
           });
           logger.info("Stream successfully saved to Prisma DB", { txHash: event.txHash });
+
+          // Webhook triggering for large streams (> 10,000 XLM) after both indexers save
+          const XLM_THRESHOLD = 10000_0000000n;
+          const totalAmount = BigInt(amount);
+          if (totalAmount >= XLM_THRESHOLD) {
+            logger.info("Large stream detected, triggering webhooks", {
+              streamId,
+              amount: amount,
+            });
+
+            await this.webhookService.trigger({
+              eventType: "stream_created",
+              streamId: streamId || null,
+              txHash: event.txHash,
+              sender,
+              receiver,
+              amount: amount,
+              timestamp: new Date().toISOString(),
+            });
+          }
         } catch (error) {
           logger.error("Failed to decode or save StreamCreated event", error);
         }
@@ -317,7 +410,13 @@ export class EventWatcher {
             const amountWithdrawn = dataObj.amount !== undefined ? String(dataObj.amount) : "0";
 
             if (withdrawStreamId !== "") {
-              const stream = await prisma.stream.findUnique({
+              const stream = await (
+                prisma as unknown as {
+                  stream: {
+                    findUnique: (arg: { where: { streamId: string } }) => Promise<{ id: string; withdrawn: string | null } | null>;
+                  };
+                }
+              ).stream.findUnique({
                 where: { streamId: withdrawStreamId },
               });
 
@@ -326,7 +425,16 @@ export class EventWatcher {
                 const newWithdrawn = BigInt(amountWithdrawn);
                 const totalWithdrawn = (currentWithdrawn + newWithdrawn).toString();
 
-                await prisma.stream.update({
+                await (
+                  prisma as unknown as {
+                    stream: {
+                      update: (arg: {
+                        where: { id: string };
+                        data: { withdrawn: string };
+                      }) => Promise<unknown>;
+                    };
+                  }
+                ).stream.update({
                   where: { id: stream.id },
                   data: { withdrawn: totalWithdrawn },
                 });
@@ -404,6 +512,32 @@ export class EventWatcher {
       amount: totalAmount,
       metadata: eventData,
     });
+  }
+
+  private async handleProposalCreated(
+    event: ParsedContractEvent,
+    proposal: {
+      id: string;
+      creator: string;
+      description: string;
+      quorum: number;
+      votesFor: number;
+      votesAgainst: number;
+    }
+  ): Promise<void> {
+    await prisma.$executeRaw`
+      INSERT INTO "Proposal" ("id", "creator", "description", "quorum", "votesFor", "votesAgainst", "txHash", "updatedAt")
+      VALUES (${proposal.id}, ${proposal.creator}, ${proposal.description}, ${proposal.quorum}, ${proposal.votesFor}, ${proposal.votesAgainst}, ${event.txHash}, NOW())
+      ON CONFLICT ("id")
+      DO UPDATE SET
+        "creator" = EXCLUDED."creator",
+        "description" = EXCLUDED."description",
+        "quorum" = EXCLUDED."quorum",
+        "votesFor" = EXCLUDED."votesFor",
+        "votesAgainst" = EXCLUDED."votesAgainst",
+        "txHash" = EXCLUDED."txHash",
+        "updatedAt" = NOW()
+    `;
   }
 
   private async handleStreamWithdrawn(
@@ -512,6 +646,80 @@ export class EventWatcher {
       return fallbackIso;
     }
     return new Date(timestampMs).toISOString();
+  }
+
+  /**
+   * Fetch ledger hash from Horizon and store in DB
+   */
+  private async storeLedgerHash(sequence: number): Promise<void> {
+    try {
+      const page = await this.horizonServer
+        .ledgers()
+        .ledger(sequence)
+        .call();
+      const ledgerRecord = page.records?.[0];
+      if (!ledgerRecord) {
+        logger.warn("No ledger record returned", { sequence });
+        return;
+      }
+      const hash = ledgerRecord.hash;
+
+      await (prisma as unknown as { ledgerHash: { upsert: (arg: { where: { sequence: number }; update: { hash: string }; create: { sequence: number; hash: string } }) => Promise<unknown> } }).ledgerHash.upsert({
+        where: { sequence },
+        update: { hash },
+        create: { sequence, hash },
+      });
+
+      logger.debug("Stored ledger hash", {
+        sequence,
+        hash,
+      });
+    } catch (error) {
+      logger.warn("Failed to store ledger hash", {
+        sequence,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Trigger verification if 100+ ledgers have passed since last check
+   */
+  private async maybeVerifyLedgers(): Promise<void> {
+    if (this.state.ledgersSinceLastVerification < 100) {
+      return;
+    }
+
+    const fromSequence = this.state.lastVerifiedLedger + 1;
+    const toSequence = this.state.lastProcessedLedger;
+
+    try {
+      const result = await this.verificationService.verifyLedgers(
+        fromSequence,
+        toSequence
+      );
+
+      if (!result.verified) {
+        logger.error("Ledger hash verification FAILED — data integrity mismatch", undefined, {
+          fromSequence,
+          toSequence,
+          mismatchCount: result.mismatches.length,
+          mismatches: result.mismatches,
+        });
+      } else {
+        logger.info("Ledger hash verification passed", {
+          fromSequence,
+          toSequence,
+        });
+      }
+
+      this.state.lastVerifiedLedger = toSequence;
+      this.state.ledgersSinceLastVerification = 0;
+    } catch (error) {
+      logger.warn("Ledger verification failed, will retry next cycle", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**

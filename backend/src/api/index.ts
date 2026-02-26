@@ -4,8 +4,18 @@
 import { Router, Request, Response } from "express";
 import { AuditLogService } from "../services/audit-log.service";
 import { logger } from "../logger";
+import streamsRouter from "./streams.routes";
+import yieldRouter from "./yield.routes.js";
+import snapshotRouter from "./snapshot.routes";
+import governanceRouter from "./governance.routes.js";
 
 const router = Router();
+
+// Register v1 routes
+router.use("/v1", streamsRouter);
+router.use("/v1/yield", yieldRouter);
+router.use("/v1/snapshots", snapshotRouter);
+router.use("/v1", governanceRouter);
 const auditLogService = new AuditLogService();
 
 /**
@@ -46,10 +56,11 @@ router.get("/audit-log/:streamId", async (req: Request, res: Response) => {
     const { streamId } = req.params;
 
     if (!streamId) {
-      return res.status(400).json({
+      res.status(400).json({
         success: false,
         error: "Stream ID is required",
       });
+      return;
     }
 
     const events = await auditLogService.getStreamEvents(streamId);
@@ -70,4 +81,3 @@ router.get("/audit-log/:streamId", async (req: Request, res: Response) => {
 });
 
 export default router;
-

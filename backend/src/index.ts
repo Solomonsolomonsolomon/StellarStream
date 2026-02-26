@@ -25,6 +25,12 @@ Sentry.init({
   tracesSampleRate: 1.0,
 });
 
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN, // add to .env
+  environment: process.env.NODE_ENV ?? "development",
+  tracesSampleRate: 1.0,
+});
 const app: Express = express();
 const server = createServer(app);
 const io = new SocketIOServer(server, {
@@ -38,6 +44,9 @@ const PORT = process.env.PORT ?? 3000;
 const wsService = new WebSocketService(io);
 const cleanupWorker = new StaleStreamCleanupWorker();
 
+
+
+const wsService = new WebSocketService(io);
 // Security: Helmet for secure HTTP headers
 app.use(helmet({
   contentSecurityPolicy: {
@@ -83,9 +92,13 @@ app.use(authMiddleware);
 app.use('/api', apiRouter);
 app.use('/api/test', testRoutes);
 
+app.use('/api/test', testRoutes);
+
 app.get('/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
+  res.json({ 
+    status: 'ok', 
     message: 'StellarStream Backend is running',
     websocket: true,
     connectedUsers: wsService.getConnectedUsers().length
@@ -104,6 +117,19 @@ app.get('/ws-status', (_req: Request, res: Response) => {
   });
 });
 
+app.get('/ws-status', (_req: Request, res: Response) => {
+  res.json({
+    connectedUsers: wsService.getConnectedUsers(),
+    userConnections: Object.fromEntries(
+      wsService.getConnectedUsers().map(addr => [
+        addr,
+        wsService.getUserSocketCount(addr)
+      ])
+    )
+  });
+});
+
+server.listen(PORT, () => {
 app.get('/stats', rateLimitMiddleware, getStats);
 app.get('/search', rateLimitMiddleware, getSearch);
 
@@ -112,9 +138,13 @@ authRouter.get('/nonce', rateLimitMiddleware, getNonce);
 authRouter.get('/me', rateLimitMiddleware, requireWalletAuth, getMe);
 app.use('/api/v1/auth', authRouter);
 
+app.use(batchRoutes);
+app.use(healthRoutes);
+
 async function start(): Promise<void> {
   await ensureRedis();
 
+  
   // Batch metadata endpoint for bulk streaming queries
   app.use(batchRoutes);
   app.use(healthRoutes);
@@ -127,6 +157,10 @@ async function start(): Promise<void> {
   // Start hourly stale stream cleanup worker
   cleanupWorker.start();
 
+  
+  // Initialize snapshot maintenance scheduler
+  scheduleSnapshotMaintenance();
+  
   app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
   });
@@ -153,6 +187,14 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 start().catch((err) => {
   console.error('Failed to start server:', err);
   process.exit(1);
+// Batch metadata endpoint for bulk streaming queries
+app.use(batchRoutes);
+app.use(healthRoutes);
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`🔌 WebSocket server is ready for connections`);
+  console.log(`🧪 Test endpoints available at /api/test/*`);
 });
 
 export default app;
