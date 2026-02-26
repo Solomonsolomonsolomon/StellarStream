@@ -5,11 +5,13 @@ import { Router, Request, Response } from "express";
 import { AuditLogService } from "../services/audit-log.service";
 import { logger } from "../logger";
 import streamsRouter from "./streams.routes";
+import yieldRouter from "./yield.routes.js";
 
 const router = Router();
 
 // Register v1 routes
 router.use("/v1", streamsRouter);
+router.use("/v1/yield", yieldRouter);
 const auditLogService = new AuditLogService();
 
 /**
