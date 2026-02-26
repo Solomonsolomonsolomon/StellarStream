@@ -15,6 +15,7 @@ import { ensureRedis, closeRedis } from './lib/redis.js';
 import { prisma } from './lib/db.js';
 import batchRoutes from './api/routes.js';
 import healthRoutes from './api/health.routes.js';
+import { scheduleSnapshotMaintenance } from './services/snapshot.scheduler.js';
 
 const app: Express = express();
 const server = createServer(app);
@@ -113,6 +114,9 @@ async function start(): Promise<void> {
   // Batch metadata endpoint for bulk streaming queries
   app.use(batchRoutes);
   app.use(healthRoutes);
+  
+  // Initialize snapshot maintenance scheduler
+  scheduleSnapshotMaintenance();
   
   app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
