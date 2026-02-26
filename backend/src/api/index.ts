@@ -4,8 +4,12 @@
 import { Router, Request, Response } from "express";
 import { AuditLogService } from "../services/audit-log.service";
 import { logger } from "../logger";
+import streamsRouter from "./streams.routes";
 
 const router = Router();
+
+// Register v1 routes
+router.use("/v1", streamsRouter);
 const auditLogService = new AuditLogService();
 
 /**
