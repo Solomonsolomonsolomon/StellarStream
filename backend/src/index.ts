@@ -1,4 +1,9 @@
+import * as Sentry from "@sentry/node";
 import express, { Express, Request, Response } from 'express';
+import { createServer } from 'http';
+import { Server as SocketIOServer } from 'socket.io';
+import { WebSocketService } from './services/websocket.service';
+import testRoutes from './api/test.js';
 import helmet from 'helmet';
 import cors from 'cors';
 import apiRouter from './api';
@@ -11,9 +16,27 @@ import { ensureRedis, closeRedis } from './lib/redis.js';
 import { prisma } from './lib/db.js';
 import batchRoutes from './api/routes.js';
 import healthRoutes from './api/health.routes.js';
+import { scheduleSnapshotMaintenance } from './services/snapshot.scheduler.js';
+import { StaleStreamCleanupWorker } from './stale-stream-cleanup.worker.js';
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN, // add to .env
+  environment: process.env.NODE_ENV ?? "development",
+  tracesSampleRate: 1.0,
+});
 
 const app: Express = express();
+const server = createServer(app);
+const io = new SocketIOServer(server, {
+  cors: {
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    methods: ["GET", "POST"]
+  }
+});
+
 const PORT = process.env.PORT ?? 3000;
+const wsService = new WebSocketService(io);
+const cleanupWorker = new StaleStreamCleanupWorker();
 
 // Security: Helmet for secure HTTP headers
 app.use(helmet({
@@ -33,15 +56,15 @@ app.use(helmet({
 }));
 
 // Security: CORS configuration
-const allowedOrigins = process.env.FRONTEND_URL 
+const allowedOrigins = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL.split(',').map(url => url.trim())
   : ['http://localhost:5173'];
 
 app.use(cors({
-  origin: (origin, callback) => {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    
+
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -58,9 +81,27 @@ app.use(authMiddleware);
 
 // Register API routes
 app.use('/api', apiRouter);
+app.use('/api/test', testRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', message: 'StellarStream Backend is running' });
+  res.json({
+    status: 'ok',
+    message: 'StellarStream Backend is running',
+    websocket: true,
+    connectedUsers: wsService.getConnectedUsers().length
+  });
+});
+
+app.get('/ws-status', (_req: Request, res: Response) => {
+  res.json({
+    connectedUsers: wsService.getConnectedUsers(),
+    userConnections: Object.fromEntries(
+      wsService.getConnectedUsers().map(addr => [
+        addr,
+        wsService.getUserSocketCount(addr)
+      ])
+    )
+  });
 });
 
 app.get('/stats', rateLimitMiddleware, getStats);
@@ -73,6 +114,19 @@ app.use('/api/v1/auth', authRouter);
 
 async function start(): Promise<void> {
   await ensureRedis();
+
+  // Batch metadata endpoint for bulk streaming queries
+  app.use(batchRoutes);
+  app.use(healthRoutes);
+
+  Sentry.setupExpressErrorHandler(app);
+
+  // Initialize snapshot maintenance scheduler
+  scheduleSnapshotMaintenance();
+
+  // Start hourly stale stream cleanup worker
+  cleanupWorker.start();
+
   app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
   });
@@ -80,6 +134,7 @@ async function start(): Promise<void> {
 
 function shutdown(signal: string): void {
   console.log(`${signal} received, shutting down gracefully...`);
+  cleanupWorker.stop();
   closeRedis()
     .then(() => prisma.$disconnect())
     .then(() => {
@@ -98,12 +153,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 start().catch((err) => {
   console.error('Failed to start server:', err);
   process.exit(1);
-// Batch metadata endpoint for bulk streaming queries
-app.use(batchRoutes);
-app.use(healthRoutes);
-
-app.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
 });
 
 export default app;
+export { wsService };

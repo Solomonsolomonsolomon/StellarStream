@@ -8,16 +8,18 @@ datasource db {
 
 // Mirroring the Stream state from Soroban
 model Stream {
-  id              String   @id // The Contract ID or unique Stream ID
+  id              String       @id // The Contract ID or unique Stream ID
   sender          String
   receiver        String
   tokenAddress    String
   amountPerSecond BigInt
   totalAmount     BigInt
   status          StreamStatus @default(ACTIVE)
+  endTime         DateTime?
 
   @@index([sender])
   @@index([receiver])
+  @@index([endTime])
 }
 
 // Tracks the last synced blockchain state
