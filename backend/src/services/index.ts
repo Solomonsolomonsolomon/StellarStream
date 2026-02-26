@@ -14,3 +14,5 @@ export {
   type StreamMetadataResult,
   type StreamMetadataError,
 } from "./batch-metadata.service.js";
+
+export { WebhookService } from "./webhook.service.js";
