@@ -6,6 +6,15 @@ import { SorobanRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 import { ParsedContractEvent } from "./types";
 import { logger } from "./logger";
 import * as Sentry from "@sentry/node";
+
+export interface ParsedProposalCreatedEvent {
+  id: string;
+  creator: string;
+  description: string;
+  quorum: number;
+  votesFor: number;
+  votesAgainst: number;
+}
 /**
  * Parse raw Stellar event into structured format
  */
@@ -133,4 +142,87 @@ export function extractEventType(topics: string[]): string {
   } catch {
     return "unknown";
   }
+}
+
+/**
+ * Parse a ProposalCreated contract event directly from XDR payload.
+ * Returns null when the event is not a proposal creation.
+ */
+export function parseProposalCreatedEventXdr(
+  event: SorobanRpc.Api.EventResponse
+): ParsedProposalCreatedEvent | null {
+  try {
+    if (event.topic.length === 0) {
+      return null;
+    }
+
+    const eventName = String(parseScVal(event.topic[0])).toLowerCase();
+    if (eventName !== "create" && eventName !== "proposal_created") {
+      return null;
+    }
+
+    const payload = parseScVal(event.value);
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+      return null;
+    }
+
+    const data = payload as Record<string, unknown>;
+    const proposalId = readId(data.proposal_id ?? data.proposalId ?? data.id);
+    if (!proposalId) {
+      return null;
+    }
+
+    const topicCreator = event.topic[1] ? parseScVal(event.topic[1]) : null;
+    const creator = readText(data.creator ?? data.sender ?? topicCreator, "unknown");
+    const description = readText(
+      data.description ?? data.title ?? data.metadata,
+      `Proposal #${proposalId}`
+    );
+    const quorum = readInt(data.quorum ?? data.required_approvals, 0);
+    const votesFor = readInt(data.votes_for ?? data.votesFor, 0);
+    const votesAgainst = readInt(data.votes_against ?? data.votesAgainst, 0);
+
+    return {
+      id: proposalId,
+      creator,
+      description,
+      quorum,
+      votesFor,
+      votesAgainst,
+    };
+  } catch (error) {
+    logger.warn("Failed to parse ProposalCreated event XDR", { error });
+    return null;
+  }
+}
+
+function readId(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  return null;
+}
+
+function readText(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function readInt(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+  }
+  return fallback;
 }

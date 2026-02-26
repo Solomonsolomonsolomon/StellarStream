@@ -8,12 +8,17 @@ import {
 import validateRequest from "../middleware/validateRequest";
 import stellarAddressSchema from "../validation/stellar";
 import asyncHandler from "../utils/asyncHandler";
+import { prisma } from "../lib/db";
 
 const router = Router();
 const streamService = new StreamService();
 const streamFeeEstimationService = new StreamFeeEstimationService();
 
 const getStreamsParamsSchema = z.object({
+  address: stellarAddressSchema,
+});
+
+const exportStreamsParamsSchema = z.object({
   address: stellarAddressSchema,
 });
 
@@ -35,10 +40,108 @@ const estimateFeeBodySchema = z.object({
   curveType: z.enum(["linear", "exponential"]).default("linear"),
   isSoulbound: z.boolean().default(false),
 });
+interface ExportRow {
+  streamId: string;
+  token: string;
+  amount: string;
+  startDate: string;
+  endDate: string;
+  totalWithdrawn: string;
+}
+
+/**
+ * GET /api/v1/streams/export/:address
+ * Returns downloadable CSV export for a wallet's stream history.
+ */
+router.get(
+  "/streams/export/:address",
+  validateRequest({
+    params: exportStreamsParamsSchema,
+  }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { address } = req.params;
+
+    const streams = await prisma.stream.findMany({
+      where: {
+        OR: [{ sender: address }, { receiver: address }],
+      },
+      select: {
+        streamId: true,
+        tokenAddress: true,
+        amount: true,
+        withdrawn: true,
+        duration: true,
+      },
+      orderBy: {
+        streamId: "desc",
+      },
+    });
+
+    const streamIds = streams
+      .map((stream) => stream.streamId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+
+    const createEvents = streamIds.length
+      ? await prisma.eventLog.findMany({
+          where: {
+            eventType: "create",
+            streamId: {
+              in: streamIds,
+            },
+          },
+          select: {
+            streamId: true,
+            ledgerClosedAt: true,
+            metadata: true,
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        })
+      : [];
+
+    const createEventByStreamId = new Map<
+      string,
+      { ledgerClosedAt: string; metadata: string | null }
+    >();
+    for (const event of createEvents) {
+      if (!createEventByStreamId.has(event.streamId)) {
+        createEventByStreamId.set(event.streamId, {
+          ledgerClosedAt: event.ledgerClosedAt,
+          metadata: event.metadata,
+        });
+      }
+    }
+
+    const rows: ExportRow[] = streams.map((stream) => {
+      const resolvedStreamId = stream.streamId ?? "";
+      const event = createEventByStreamId.get(resolvedStreamId);
+      const metadata = parseMetadata(event?.metadata ?? null);
+      const startDate = resolveStartDate(metadata, event?.ledgerClosedAt);
+      const endDate = resolveEndDate(metadata, startDate, stream.duration);
+
+      return {
+        streamId: resolvedStreamId,
+        token: stream.tokenAddress ?? "",
+        amount: stream.amount,
+        startDate,
+        endDate,
+        totalWithdrawn: stream.withdrawn ?? "0",
+      };
+    });
+
+    const csv = toCsv(rows);
+    const filename = `streams-${address}-${new Date().toISOString().slice(0, 10)}.csv`;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${filename}\"`);
+    res.status(200).send(csv);
+  })
+);
 
 /**
  * GET /api/v1/streams/:address
- * Returns streams for a given address with optional filtering
+ * Returns streams for a given address with optional filtering.
  * Query params:
  *   - direction: inbound | outbound (optional)
  *   - status: active | paused | completed (optional)
@@ -116,5 +219,106 @@ router.post(
     });
   })
 );
+function parseMetadata(raw: string | null): Record<string, unknown> {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function resolveStartDate(
+  metadata: Record<string, unknown>,
+  ledgerClosedAt?: string
+): string {
+  const value = metadata.start_time ?? metadata.startTime ?? metadata.timestamp;
+  const parsed = toIsoDate(value);
+  if (parsed) {
+    return parsed;
+  }
+  return ledgerClosedAt ?? "";
+}
+
+function resolveEndDate(
+  metadata: Record<string, unknown>,
+  startDate: string,
+  duration: number | null
+): string {
+  const value = metadata.end_time ?? metadata.endTime;
+  const parsed = toIsoDate(value);
+  if (parsed) {
+    return parsed;
+  }
+
+  if (startDate && typeof duration === "number" && Number.isFinite(duration) && duration > 0) {
+    const startMs = Date.parse(startDate);
+    if (!Number.isNaN(startMs)) {
+      return new Date(startMs + duration * 1000).toISOString();
+    }
+  }
+
+  return "";
+}
+
+function toIsoDate(value: unknown): string | null {
+  if (typeof value === "string" && value.length > 0) {
+    const direct = Date.parse(value);
+    if (!Number.isNaN(direct)) {
+      return new Date(direct).toISOString();
+    }
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber)) {
+      return new Date(asNumber * 1000).toISOString();
+    }
+    return null;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value * 1000).toISOString();
+  }
+
+  if (typeof value === "bigint") {
+    return new Date(Number(value) * 1000).toISOString();
+  }
+
+  return null;
+}
+
+function escapeCsv(value: string): string {
+  if (/[",\n]/.test(value)) {
+    return `"${value.replace(/"/g, "\"\"")}"`;
+  }
+  return value;
+}
+
+function toCsv(rows: ExportRow[]): string {
+  const header = [
+    "Stream ID",
+    "Token",
+    "Amount",
+    "Start Date",
+    "End Date",
+    "Total Withdrawn",
+  ];
+
+  const lines = rows.map((row) =>
+    [
+      row.streamId,
+      row.token,
+      row.amount,
+      row.startDate,
+      row.endDate,
+      row.totalWithdrawn,
+    ]
+      .map((cell) => escapeCsv(cell))
+      .join(",")
+  );
+
+  return `${header.join(",")}\n${lines.join("\n")}\n`;
+}
 
 export default router;
