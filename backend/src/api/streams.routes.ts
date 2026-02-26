@@ -1,9 +1,22 @@
 import { Router, Request, Response } from "express";
+import { z } from "zod";
 import { StreamService } from "../services/stream.service";
-import { logger } from "../logger";
+import validateRequest from "../middleware/validateRequest";
+import stellarAddressSchema from "../validation/stellar";
+import asyncHandler from "../utils/asyncHandler";
 
 const router = Router();
 const streamService = new StreamService();
+
+const getStreamsParamsSchema = z.object({
+  address: stellarAddressSchema,
+});
+
+const getStreamsQuerySchema = z.object({
+  direction: z.enum(["inbound", "outbound"]).optional(),
+  status: z.enum(["active", "paused", "completed"]).optional(),
+  tokens: z.string().optional(),
+});
 
 /**
  * GET /api/v1/streams/:address
@@ -13,34 +26,30 @@ const streamService = new StreamService();
  *   - status: active | paused | completed (optional)
  *   - tokens: comma-separated token addresses (optional)
  */
-router.get("/streams/:address", async (req: Request, res: Response) => {
-  try {
+router.get(
+  "/streams/:address",
+  validateRequest({
+    params: getStreamsParamsSchema,
+    query: getStreamsQuerySchema,
+  }),
+  asyncHandler(async (req: Request, res: Response) => {
     const { address } = req.params;
-    const { direction, status, tokens } = req.query;
+    const { direction, status, tokens } = req.query as z.infer<
+      typeof getStreamsQuerySchema
+    >;
 
-    if (!address) {
-      res.status(400).json({
-        success: false,
-        error: "Address is required",
-      });
-      return;
-    }
+    const filters = {
+      ...(direction ? { direction } : {}),
+      ...(status ? { status } : {}),
+      ...(typeof tokens === "string" && tokens.length > 0
+        ? { tokenAddresses: tokens.split(",").map((t) => t.trim()) }
+        : {}),
+    };
 
-    const filters: any = {};
-
-    if (direction && (direction === "inbound" || direction === "outbound")) {
-      filters.direction = direction;
-    }
-
-    if (status && ["active", "paused", "completed"].includes(status as string)) {
-      filters.status = status;
-    }
-
-    if (tokens && typeof tokens === "string") {
-      filters.tokenAddresses = tokens.split(",").map((t) => t.trim());
-    }
-
-    const streams = await streamService.getStreamsForAddress(address, filters);
+    const streams = await streamService.getStreamsForAddress(
+      address,
+      filters,
+    );
 
     res.json({
       success: true,
@@ -49,13 +58,7 @@ router.get("/streams/:address", async (req: Request, res: Response) => {
       filters,
       streams,
     });
-  } catch (error) {
-    logger.error("Failed to retrieve streams", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to retrieve streams",
-    });
-  }
-});
+  })
+);
 
 export default router;
