@@ -15,6 +15,7 @@ import {
   toBigIntOrNull,
   toObjectOrNull,
 } from "./services/stream-lifecycle-service";
+import { WebhookService } from "./services/webhook.service";
 
 // @ts-expect-error Prisma Client may not be generated yet
 const prisma = new PrismaClient();
@@ -29,6 +30,7 @@ export class EventWatcher {
   private streamLifecycleService: StreamLifecycleService;
   private verificationService: LedgerVerificationService;
   private auditLogService: AuditLogService;
+  private webhookService: WebhookService;
 
   constructor(config: EventWatcherConfig) {
     this.config = config;
@@ -50,6 +52,7 @@ export class EventWatcher {
       prisma
     );
     this.auditLogService = new AuditLogService();
+    this.webhookService = new WebhookService();
 
     logger.info("EventWatcher initialized", {
       rpcUrl: config.rpcUrl,
@@ -323,6 +326,26 @@ export class EventWatcher {
             },
           });
           logger.info("Stream successfully saved to Prisma DB", { txHash: event.txHash });
+
+          // Webhook triggering for large streams (> 10,000 XLM) after both indexers save
+          const XLM_THRESHOLD = 10000_0000000n;
+          const totalAmount = BigInt(amount);
+          if (totalAmount >= XLM_THRESHOLD) {
+            logger.info("Large stream detected, triggering webhooks", {
+              streamId,
+              amount: amount,
+            });
+
+            await this.webhookService.trigger({
+              eventType: "stream_created",
+              streamId: streamId || null,
+              txHash: event.txHash,
+              sender,
+              receiver,
+              amount: amount,
+              timestamp: new Date().toISOString(),
+            });
+          }
         } catch (error) {
           logger.error("Failed to decode or save StreamCreated event", error);
         }
