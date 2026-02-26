@@ -5,7 +5,11 @@
 import { SorobanRpc, Horizon } from "@stellar/stellar-sdk";
 import { EventWatcherConfig, WatcherState, ParsedContractEvent } from "./types";
 import { logger } from "./logger";
-import { parseContractEvent, extractEventType } from "./event-parser";
+import {
+  parseContractEvent,
+  extractEventType,
+  parseProposalCreatedEventXdr,
+} from "./event-parser";
 import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import { PrismaClient } from "./generated/client/index.js";
 import { LedgerVerificationService } from "./services/ledger-verification.service.js";
@@ -261,7 +265,7 @@ export class EventWatcher {
     });
 
     // Here you can add custom handlers for specific event types
-    await this.handleEventByType(eventType, parsed);
+    await this.handleEventByType(eventType, parsed, event);
   }
 
   /**
@@ -270,7 +274,8 @@ export class EventWatcher {
    */
   private async handleEventByType(
     eventType: string,
-    event: ParsedContractEvent
+    event: ParsedContractEvent,
+    rawEvent: SorobanRpc.Api.EventResponse
   ): Promise<void> {
     const eventData = toObjectOrNull(event.value);
     if (!eventData) {
@@ -286,6 +291,19 @@ export class EventWatcher {
     switch (eventType) {
       case "create":
       case "stream_created":
+        {
+          const proposal = parseProposalCreatedEventXdr(rawEvent);
+          if (proposal) {
+            await this.handleProposalCreated(event, proposal);
+            logger.info("Governance proposal created event detected", {
+              txHash: event.txHash,
+              ledger: event.ledger,
+              proposalId: proposal.id,
+            });
+            break;
+          }
+        }
+
         await this.handleStreamCreated(event, eventData);
         logger.info("Stream created event detected", {
           txHash: event.txHash,
@@ -494,6 +512,32 @@ export class EventWatcher {
       amount: totalAmount,
       metadata: eventData,
     });
+  }
+
+  private async handleProposalCreated(
+    event: ParsedContractEvent,
+    proposal: {
+      id: string;
+      creator: string;
+      description: string;
+      quorum: number;
+      votesFor: number;
+      votesAgainst: number;
+    }
+  ): Promise<void> {
+    await prisma.$executeRaw`
+      INSERT INTO "Proposal" ("id", "creator", "description", "quorum", "votesFor", "votesAgainst", "txHash", "updatedAt")
+      VALUES (${proposal.id}, ${proposal.creator}, ${proposal.description}, ${proposal.quorum}, ${proposal.votesFor}, ${proposal.votesAgainst}, ${event.txHash}, NOW())
+      ON CONFLICT ("id")
+      DO UPDATE SET
+        "creator" = EXCLUDED."creator",
+        "description" = EXCLUDED."description",
+        "quorum" = EXCLUDED."quorum",
+        "votesFor" = EXCLUDED."votesFor",
+        "votesAgainst" = EXCLUDED."votesAgainst",
+        "txHash" = EXCLUDED."txHash",
+        "updatedAt" = NOW()
+    `;
   }
 
   private async handleStreamWithdrawn(
