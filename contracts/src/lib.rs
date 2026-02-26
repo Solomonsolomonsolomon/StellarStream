@@ -43,9 +43,9 @@ use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
 use storage::{PROPOSAL_COUNT, RECEIPT, STREAM_COUNT};
 use types::{
-    ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent,
-    ProposalCreatedEvent, RequestCreatedEvent, RequestExecutedEvent, RequestKey, RequestStatus,
-    Role, Stream, StreamCreatedEvent, StreamProposal, StreamReceipt,
+    ContributorRequest, CurveType, DataKey, Milestone, ProposalApprovedEvent, ProposalCreatedEvent,
+    RequestCreatedEvent, RequestExecutedEvent, RequestKey, RequestStatus, Role, Stream,
+    StreamCreatedEvent, StreamProposal, StreamReceipt,
 };
 
 #[contract]
@@ -885,14 +885,8 @@ soroban_sdk::contractmeta!(
     key = "Description",
     val = "StellarStream: Token streaming with multi-sig proposals, dynamic vesting curves (linear/exponential), yield optimization, and OFAC compliance. Create, manage, and withdraw from streams with flexible approval workflows."
 );
-soroban_sdk::contractmeta!(
-    key = "Version",
-    val = "0.1.0"
-);
-soroban_sdk::contractmeta!(
-    key = "Name",
-    val = "StellarStream"
-);
+soroban_sdk::contractmeta!(key = "Version", val = "0.1.0");
+soroban_sdk::contractmeta!(key = "Name", val = "StellarStream");
 
 #[cfg(test)]
 mod test {
